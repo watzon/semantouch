@@ -1,0 +1,92 @@
+{
+  "architectures": [
+    "arm64"
+  ],
+  "bundleId": "dev.watzon.semantouch",
+  "bundleIdIsPlaceholder": true,
+  "contractVersion": "semantouch/1",
+  "description": "Semantouch provides native macOS computer use: per-window capture (including covered windows), a compact accessibility tree with stable element ids, semantic accessibility actions, incremental tree diffs, guarded native input fallback, and a decorative virtual-cursor overlay — exposed as a stdio MCP server.",
+  "displayName": "Semantouch",
+  "manifestVersion": 1,
+  "mcpProtocolVersion": "2025-06-18",
+  "minimumMacOS": "14.4",
+  "name": "semantouch",
+  "permissions": [
+    {
+      "key": "accessibility",
+      "reason": "Read the accessibility tree of the target window and perform semantic AX actions.",
+      "required": true
+    },
+    {
+      "key": "screenRecording",
+      "reason": "Capture a still image of the target window (including a covered/background window) via ScreenCaptureKit.",
+      "required": true
+    }
+  ],
+  "server": {
+    "args": [
+      "mcp"
+    ],
+    "command": "/Applications/Semantouch.app/Contents/MacOS/semantouch",
+    "type": "stdio"
+  },
+  "tools": [
+    {
+      "name": "doctor",
+      "phase": 1
+    },
+    {
+      "name": "list_apps",
+      "phase": 1
+    },
+    {
+      "name": "get_app_state",
+      "phase": 1
+    },
+    {
+      "name": "screenshot",
+      "phase": 1
+    },
+    {
+      "name": "end_app_session",
+      "phase": 1
+    },
+    {
+      "name": "click",
+      "phase": 2
+    },
+    {
+      "name": "perform_action",
+      "phase": 2
+    },
+    {
+      "name": "set_value",
+      "phase": 2
+    },
+    {
+      "name": "select_text",
+      "phase": 2
+    },
+    {
+      "name": "scroll",
+      "phase": 2
+    },
+    {
+      "name": "press_key",
+      "phase": 4
+    },
+    {
+      "name": "type_text",
+      "phase": 4
+    },
+    {
+      "name": "drag",
+      "phase": 4
+    },
+    {
+      "name": "wait_for",
+      "phase": 4
+    }
+  ],
+  "version": "0.2.0"
+}

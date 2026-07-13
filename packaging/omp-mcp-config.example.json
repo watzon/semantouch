@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "semantouch": {
+      "args": [
+        "mcp"
+      ],
+      "command": "/Applications/Semantouch.app/Contents/MacOS/semantouch",
+      "timeout": 30000,
+      "type": "stdio"
+    }
+  }
+}

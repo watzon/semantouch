@@ -1,0 +1,19 @@
+{
+  "name": "semantouch",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Semantouch native macOS computer-use MCP server and OMP integration.",
+  "keywords": [
+    "omp",
+    "mcp",
+    "macos",
+    "accessibility",
+    "computer-use"
+  ],
+  "files": [
+    ".mcp.json",
+    "commands",
+    "skills"
+  ],
+  "omp": {}
+}

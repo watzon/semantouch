@@ -1,0 +1,19 @@
+.build/
+.build-*/
+.swiftpm/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Editor and tool output
+DerivedData/
+*.dSYM/
+node_modules/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.xcodeproj
+artifacts/
+probes/
