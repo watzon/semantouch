@@ -1,38 +1,55 @@
 # Install
 
-How to build, permission, and register the `semantouch` helper with OMP.
-See [USAGE.md](USAGE.md) for the tool surface and [RELEASE.md](RELEASE.md) for signing
-and notarization.
+Install, permission, and register the `semantouch` helper with OMP. See
+[USAGE.md](USAGE.md) for the tool surface and [RELEASE.md](RELEASE.md) for release,
+signing, and notarization details.
 
 ## Requirements
 
 - macOS **14.4** or later, Apple Silicon (arm64).
-- A Swift 6 toolchain (Xcode 16+ or the matching Swift.org toolchain).
-- OMP and `just` for the recommended plugin installation recipe.
-- **Zero Swift package dependencies** — the package pulls nothing from the network to build.
+- OMP.
+- Network access when a released helper version is downloaded for the first time.
 
-## Recommended: install as an OMP plugin
+A Swift 6 toolchain (Xcode 16+ or matching Swift.org toolchain) and `just` are required
+only for source builds. The Swift package has zero external dependencies.
 
-From the repository root:
+## Recommended: install the released OMP plugin
+
+Install a specific release:
 
 ```sh
-just omp-install
+omp plugin install github:watzon/semantouch#v0.2.0
 ```
 
-This builds the release executable, installs it at
-`~/.omp/bin/semantouch`, links the repository with `omp plugin link .`,
-and runs the installed helper's read-only `doctor` check. The linked package
-provides `.mcp.json`, the `semantouch` and `semantouch-setup` skills, and
-the `/semantouch-doctor` command.
+Or use the repository's OMP/Claude-compatible marketplace catalog:
 
-Restart OMP so it reloads plugin capabilities and launches the new MCP child,
-then check:
+```sh
+omp plugin marketplace add watzon/semantouch
+omp plugin install semantouch@semantouch
+```
+
+Restart OMP. The first MCP launch downloads `semantouch-macos-arm64` and its checksum from
+the matching GitHub release, verifies the binary, and installs it at the versioned path:
+
+```text
+~/Library/Application Support/Semantouch/0.2.0/semantouch
+```
+
+Then check:
 
 ```text
 /mcp list
 /mcp test semantouch
 /semantouch-doctor
 ```
+
+Grant Accessibility and Screen Recording to the exact helper path reported by `doctor`.
+Each release has a new path and code signature, so macOS can require both grants again
+after an upgrade.
+
+For local development, `just omp-install` still builds the release executable, installs
+it at `~/.omp/bin/semantouch`, links the checkout with `omp plugin link .`, and runs the
+read-only doctor check.
 
 The remaining sections describe the manual binary and MCP configuration flow.
 

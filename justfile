@@ -17,6 +17,29 @@ release:
       swift build -c release
     fi
 
+# Build and sign the distributable binary with a local Developer ID identity.
+signed-release identity="Developer ID Application": release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source_binary="$(swift build -c release --show-bin-path)/semantouch"
+    signed_binary="dist/semantouch-macos-arm64"
+    mkdir -p dist
+    install -m 0755 "$source_binary" "$signed_binary"
+    scripts/sign-release "$signed_binary" "{{identity}}"
+
+# Submit the locally signed binary using a notarytool keychain profile.
+notarize-release profile="notarytool-password":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    signed_binary="dist/semantouch-macos-arm64"
+    test -x "$signed_binary" || { echo "error: run 'just signed-release' first" >&2; exit 1; }
+    scripts/notarize-release "$signed_binary" "{{profile}}"
+
+# Verify the local release binary's Developer ID signature.
+verify-signed-release:
+    codesign --verify --strict --verbose=2 dist/semantouch-macos-arm64
+    codesign --display --verbose=4 dist/semantouch-macos-arm64
+
 # Run the Swift package test suite.
 test:
     swift test

@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${SEMANTOUCH_BIN:-}" ]; then
+  exec "$SEMANTOUCH_BIN" "$@"
+fi
+
+plugin_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+bundled_binary="$plugin_root/bin/semantouch"
+if [ -x "$bundled_binary" ]; then
+  exec "$bundled_binary" "$@"
+fi
+
+package_json="$plugin_root/package.json"
+version=$(/usr/bin/awk -F '"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$package_json")
+
+if [ -z "$version" ]; then
+  printf '%s\n' "semantouch: could not read the plugin version from $package_json" >&2
+  exit 1
+fi
+
+architecture=$(/usr/bin/uname -m)
+if [ "$architecture" != "arm64" ]; then
+  printf '%s\n' "semantouch: release binaries do not support architecture $architecture (arm64 required)" >&2
+  exit 1
+fi
+
+: "${HOME:?semantouch: HOME is not set}"
+asset="semantouch-macos-arm64"
+install_dir="${SEMANTOUCH_INSTALL_ROOT:-$HOME/Library/Application Support/Semantouch}/$version"
+binary="$install_dir/semantouch"
+
+if [ ! -x "$binary" ]; then
+  base_url="${SEMANTOUCH_RELEASE_BASE_URL:-https://github.com/watzon/semantouch/releases/download/v$version}"
+  temp_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch.XXXXXX")
+  trap '/bin/rm -rf "$temp_dir"' EXIT HUP INT TERM
+
+  printf '%s\n' "semantouch: downloading v$version for macOS arm64" >&2
+  /usr/bin/curl --fail --location --silent --show-error \
+    "$base_url/$asset" --output "$temp_dir/$asset"
+  /usr/bin/curl --fail --location --silent --show-error \
+    "$base_url/$asset.sha256" --output "$temp_dir/$asset.sha256"
+
+  expected=$(/usr/bin/awk 'NR == 1 { print $1 }' "$temp_dir/$asset.sha256")
+  actual=$(/usr/bin/shasum -a 256 "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')
+  if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+    printf '%s\n' "semantouch: checksum verification failed for v$version" >&2
+    exit 1
+  fi
+
+  /bin/mkdir -p "$install_dir"
+  /usr/bin/install -m 0755 "$temp_dir/$asset" "$install_dir/.semantouch.$$"
+  /bin/mv -f "$install_dir/.semantouch.$$" "$binary"
+  /bin/rm -rf "$temp_dir"
+  trap - EXIT HUP INT TERM
+fi
+
+exec "$binary" "$@"

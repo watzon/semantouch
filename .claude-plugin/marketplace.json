@@ -1,0 +1,29 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "semantouch",
+  "owner": {
+    "name": "Watzon"
+  },
+  "metadata": {
+    "description": "Native macOS computer use plugins.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "semantouch",
+      "description": "Native macOS computer use through a local MCP server.",
+      "version": "0.2.0",
+      "source": "./",
+      "category": "development",
+      "homepage": "https://github.com/watzon/semantouch",
+      "repository": "https://github.com/watzon/semantouch",
+      "license": "MIT",
+      "keywords": [
+        "accessibility",
+        "computer-use",
+        "macos",
+        "mcp"
+      ]
+    }
+  ]
+}

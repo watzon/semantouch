@@ -23,10 +23,9 @@ public enum Packaging {
     /// Human-facing plugin name.
     public static let pluginDisplayName = "Semantouch"
 
-    /// **Placeholder** bundle-id namespace. Deliberately neutral — NOT `com.openai.*`
-    /// and NOT `com.apple.*` (clean-room / no-masquerade constraint, docs/SECURITY.md §5).
-    /// Replace with the real publisher id when a signing identity exists (docs/RELEASE.md).
-    public static let bundleIdPlaceholder = "dev.watzon.semantouch"
+    /// Stable publisher identifier used for Developer ID signing and notarization.
+    /// Matches the `tech.watzon` namespace used by the publisher's other macOS apps.
+    public static let bundleId = "tech.watzon.semantouch"
 
     /// Minimum supported macOS (matches `Package.swift` `.macOS(.v14)` and docs/INSTALL.md).
     public static let minimumMacOS = "14.4"
@@ -163,8 +162,8 @@ public enum Packaging {
             displayName: pluginDisplayName,
             description: "Semantouch provides native macOS computer use: per-window capture (including covered windows), a compact accessibility tree with stable element ids, semantic accessibility actions, incremental tree diffs, guarded native input fallback, and a decorative virtual-cursor overlay — exposed as a stdio MCP server.",
             version: version,
-            bundleId: bundleIdPlaceholder,
-            bundleIdIsPlaceholder: true,
+            bundleId: bundleId,
+            bundleIdIsPlaceholder: false,
             minimumMacOS: minimumMacOS,
             architectures: architectures,
             mcpProtocolVersion: MCPServer.mcpProtocolVersion,

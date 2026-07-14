@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  printf '%s\n' "usage: $0 /path/to/semantouch" >&2
+  exit 2
+fi
+
+binary=$1
+generated_manifest=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/semantouch-manifest.XXXXXX")
+trap '/bin/rm -f "$generated_manifest"' EXIT HUP INT TERM
+"$binary" config --manifest \
+  --path "/Applications/Semantouch.app/Contents/MacOS/semantouch" > "$generated_manifest"
+
+package_version=$(/usr/bin/plutil -extract version raw package.json)
+plugin_version=$(/usr/bin/plutil -extract version raw .claude-plugin/plugin.json)
+marketplace_version=$(/usr/bin/plutil -extract metadata.version raw .claude-plugin/marketplace.json)
+entry_version=$(/usr/bin/plutil -extract plugins.0.version raw .claude-plugin/marketplace.json)
+binary_version=$("$binary" --version | /usr/bin/awk 'NR == 1 { print $2 }')
+packaging_version=$(/usr/bin/plutil -extract version raw packaging/semantouch.plugin.json)
+packaging_bundle_id=$(/usr/bin/plutil -extract bundleId raw packaging/semantouch.plugin.json)
+packaging_placeholder=$(/usr/bin/plutil -extract bundleIdIsPlaceholder raw packaging/semantouch.plugin.json)
+generated_bundle_id=$(/usr/bin/plutil -extract bundleId raw "$generated_manifest")
+generated_placeholder=$(/usr/bin/plutil -extract bundleIdIsPlaceholder raw "$generated_manifest")
+
+for candidate in "$plugin_version" "$marketplace_version" "$entry_version" "$packaging_version" "$binary_version"; do
+  if [ "$candidate" != "$package_version" ]; then
+    printf '%s\n' \
+      "release version mismatch: package=$package_version plugin=$plugin_version marketplace=$marketplace_version entry=$entry_version packaging=$packaging_version binary=$binary_version" >&2
+    exit 1
+  fi
+done
+
+if [ "$packaging_bundle_id" != "$generated_bundle_id" ] \
+  || [ "$packaging_placeholder" != "$generated_placeholder" ]; then
+  printf '%s\n' \
+    "release identity mismatch: packaging=$packaging_bundle_id/$packaging_placeholder generated=$generated_bundle_id/$generated_placeholder" >&2
+  exit 1
+fi
+
+printf '%s\n' "release metadata matches semantouch $package_version"

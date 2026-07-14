@@ -10,6 +10,7 @@
 # Editor and tool output
 DerivedData/
 *.dSYM/
+dist/
 node_modules/
 __pycache__/
 *.py[cod]

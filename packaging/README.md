@@ -1,9 +1,9 @@
 # packaging/
 
-OMP-facing packaging artifacts for the `semantouch` helper. Everything here is
-**generated from the built binary** — the binary is the single source of truth for the
-version (`MCPServer.serverVersion`), the tool list (`ToolCatalog`), and the required TCC
-permissions. Do not hand-edit; regenerate with the commands below.
+OMP-facing packaging artifacts for the `semantouch` helper. The JSON files are generated
+from the built binary, which is the single source of truth for the version
+(`MCPServer.serverVersion`), tool list (`ToolCatalog`), and required TCC permissions.
+`Release.entitlements` is the small, hand-maintained signing input.
 
 ## Files
 
@@ -11,8 +11,9 @@ permissions. Do not hand-edit; regenerate with the commands below.
 |---|---|---|
 | `semantouch.plugin.json` | Plugin manifest: identity, version, tool list, minimum macOS, required TCC grants, and the stdio launch shape. | `semantouch config --manifest --path "<install path>"` |
 | `omp-mcp-config.example.json` | Example OMP `mcpServers` block a user merges into their OMP config. | `semantouch config --path "<install path>"` |
+| `Release.entitlements` | Minimal Hardened Runtime entitlements used for Developer ID signing. This file is maintained by hand. | N/A |
 
-The checked-in copies are pretty-printed (2-space indent, sorted keys) for readability.
+The checked-in JSON files are pretty-printed (2-space indent, sorted keys) for readability.
 The `config` subcommand itself emits **compact canonical JSON** (one line, sorted keys,
 no trailing newline) — semantically identical. To reproduce a checked-in file exactly:
 
@@ -37,9 +38,9 @@ semantouch config [options]
 generator, not the MCP channel. The `mcp` subcommand still owns stdout for framed
 JSON-RPC only; all logging goes to stderr (PROTOCOL.md §1).
 
-## Bundle id is a placeholder
+## Publisher identity
 
-`bundleId` in the manifest is `dev.watzon.semantouch` — a **neutral placeholder**.
-It is deliberately not `com.openai.*` or `com.apple.*` (clean-room / no-masquerade,
-SECURITY.md §5). Replace it with the real publisher identity when a signing certificate
-exists; see docs/RELEASE.md. `bundleIdIsPlaceholder: true` flags this in the manifest.
+`bundleId` in the manifest is the owned publisher identifier
+`tech.watzon.semantouch`; `bundleIdIsPlaceholder` is `false`. Keep it aligned with the
+`--identifier` value in `scripts/sign-release` and the release workflow. See
+[`docs/RELEASE.md`](../docs/RELEASE.md) for certificate and notarization setup.

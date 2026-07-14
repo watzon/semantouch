@@ -12,9 +12,9 @@ implementation detail.
 
 ## Read in this order
 
-1. **[INSTALL.md](INSTALL.md)** — build (`swift build -c release`), where the binary lands,
-   granting Accessibility + Screen Recording (verified by `semantouch doctor`), and
-   registering with OMP via `semantouch config`.
+1. **[INSTALL.md](INSTALL.md)** — released OMP plugin installation, the verified helper
+   download, Accessibility + Screen Recording grants, and the manual source-build / MCP
+   configuration fallback.
 2. **[USAGE.md](USAGE.md)** — the fourteen MCP tools with request/response examples, the
    `get_app_state`-once-per-turn discipline, the revision / stale-id contract, the
    interference policy, and the optional app denylist (`SEMANTOUCH_DENIED_APPS`).
@@ -27,8 +27,8 @@ implementation detail.
   denylist, prompt-injection stance, and clean-room constraints.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — module layout and how capture / accessibility /
   action / overlay engines fit together.
-- **[RELEASE.md](RELEASE.md)** — code-signing and notarization steps (documented; run with
-  your own credentials).
+- **[RELEASE.md](RELEASE.md)** — Developer ID signing, notarization credentials, local
+  Pindrop-style recipes, and the signed GitHub release workflow.
 - **[FIXTURE.md](FIXTURE.md)** / **[TEST-MATRIX.md](TEST-MATRIX.md)** — the test fixture app
   and the verification matrix.
 - **[`../packaging/`](../packaging/)** — the generated OMP plugin manifest and example MCP

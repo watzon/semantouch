@@ -2,8 +2,8 @@
   "architectures": [
     "arm64"
   ],
-  "bundleId": "dev.watzon.semantouch",
-  "bundleIdIsPlaceholder": true,
+  "bundleId": "tech.watzon.semantouch",
+  "bundleIdIsPlaceholder": false,
   "contractVersion": "semantouch/1",
   "description": "Semantouch provides native macOS computer use: per-window capture (including covered windows), a compact accessibility tree with stable element ids, semantic accessibility actions, incremental tree diffs, guarded native input fallback, and a decorative virtual-cursor overlay — exposed as a stdio MCP server.",
   "displayName": "Semantouch",

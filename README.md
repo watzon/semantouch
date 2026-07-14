@@ -31,33 +31,36 @@ proprietary computer-use binaries.
 
 - Apple Silicon Mac
 - macOS 14.4 or later
-- Swift 6 toolchain (Xcode 16 or a matching Swift.org toolchain)
-- [OMP](https://github.com/can1357/oh-my-pi) and
-  [`just`](https://github.com/casey/just) for the recommended plugin install
+- [OMP](https://github.com/can1357/oh-my-pi)
+- Network access the first time a released helper version starts
 
-The Swift package has no external dependencies.
+A Swift toolchain and `just` are needed only for source builds and development.
 
-## Quick start with OMP
+## Install with OMP
 
-From the repository root:
+Install a tagged release directly:
 
 ```sh
-just omp-install
+omp plugin install github:watzon/semantouch#v0.2.0
 ```
 
-This recipe:
+Alternatively, add this repository as a marketplace and install its catalog entry:
 
-1. Builds the optimized `semantouch` executable.
-2. Installs it at `~/.omp/bin/semantouch`, a stable path for macOS privacy grants.
-3. Links this repository with `omp plugin link .`.
-4. Runs the helper's read-only permission check.
+```sh
+omp plugin marketplace add watzon/semantouch
+omp plugin install semantouch@semantouch
+```
 
-Grant the exact installed binary both permissions reported by `doctor`:
+Restart OMP. On the first MCP launch, the plugin downloads the matching Developer
+ID-signed and notarized `semantouch-macos-arm64` release asset, verifies its SHA-256
+checksum, and caches it at:
 
-- **Accessibility** — System Settings → Privacy & Security → Accessibility
-- **Screen Recording** — System Settings → Privacy & Security → Screen Recording
+```text
+~/Library/Application Support/Semantouch/0.2.0/semantouch
+```
 
-Then restart OMP and verify the integration:
+The plugin provides `.mcp.json`, the `semantouch` and `semantouch-setup` skills, and the
+`/semantouch-doctor` command. Verify the integration:
 
 ```text
 /mcp list
@@ -65,13 +68,17 @@ Then restart OMP and verify the integration:
 /semantouch-doctor
 ```
 
-> [!NOTE]
-> macOS privacy grants are tied to the executable's path and code signature. Moving,
-> rebuilding, or re-signing the binary can require granting permission again. Run
-> `~/.omp/bin/semantouch doctor` to confirm which binary macOS needs to authorize.
+Grant the exact downloaded binary both permissions reported by `doctor`:
 
-See [Installation](docs/INSTALL.md) for permission troubleshooting and manual MCP
-configuration.
+- **Accessibility** — System Settings → Privacy & Security → Accessibility
+- **Screen Recording** — System Settings → Privacy & Security → Screen Recording
+
+> [!NOTE]
+> macOS privacy grants are tied to the executable's path and code signature. A new
+> Semantouch release uses a versioned path and can require granting permission again.
+
+See [Installation](docs/INSTALL.md) for permission troubleshooting, marketplace upgrades,
+source installation, and manual MCP configuration.
 
 ## Build and run manually
 
@@ -105,10 +112,10 @@ Or run the stdio server directly from an MCP client configuration:
 }
 ```
 
-The checked-in [`.mcp.json`](.mcp.json) is tailored for the OMP plugin install. It uses
-`~/.omp/bin/semantouch` by default; set `SEMANTOUCH_BIN` to override that path.
-Release packaging examples use the separate app-bundle path
-`/Applications/Semantouch.app/Contents/MacOS/semantouch`.
+The checked-in [`.mcp.json`](.mcp.json) resolves a bundled helper, downloads and verifies
+the matching release helper, or uses the development install at `~/.omp/bin/semantouch`
+as appropriate. Set `SEMANTOUCH_BIN` to force an exact executable path. The generated
+release packaging examples use `/Applications/Semantouch.app/Contents/MacOS/semantouch`.
 
 ## MCP tools
 
@@ -144,7 +151,7 @@ Run `semantouch --help` for all `config` and `probe` options.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SEMANTOUCH_BIN` | `~/.omp/bin/semantouch` in the OMP plugin | Overrides the helper path used by `.mcp.json`. |
+| `SEMANTOUCH_BIN` | Released or bundled helper | Overrides helper discovery with an exact executable path. |
 | `SEMANTOUCH_DENIED_APPS` | Empty | Comma-separated exact app identifiers, names, paths, or path basenames to block. |
 | `SEMANTOUCH_CURSOR` | `on` | Sets the virtual cursor to `off`, `dim`, or `on`. |
 | `SEMANTOUCH_WEB_AX` | Enabled | Set to `off` to disable automatic Chromium/Electron accessibility enablement. |

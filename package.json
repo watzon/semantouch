@@ -3,6 +3,12 @@
   "version": "0.2.0",
   "private": true,
   "description": "Semantouch native macOS computer-use MCP server and OMP integration.",
+  "homepage": "https://github.com/watzon/semantouch",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/watzon/semantouch.git"
+  },
+  "license": "MIT",
   "keywords": [
     "omp",
     "mcp",
@@ -11,9 +17,13 @@
     "computer-use"
   ],
   "files": [
+    ".claude-plugin",
     ".mcp.json",
     "commands",
-    "skills"
+    "scripts/semantouch",
+    "skills",
+    "LICENSE",
+    "README.md"
   ],
   "omp": {}
 }

@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+  printf '%s\n' "usage: $0 /path/to/semantouch 'Developer ID Application: Name (TEAMID)'" >&2
+  exit 2
+fi
+
+binary=$1
+identity=$2
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+entitlements="$project_root/packaging/Release.entitlements"
+
+if [ ! -f "$binary" ]; then
+  printf '%s\n' "semantouch: release binary not found: $binary" >&2
+  exit 1
+fi
+
+/usr/bin/codesign \
+  --force \
+  --options runtime \
+  --timestamp \
+  --identifier tech.watzon.semantouch \
+  --entitlements "$entitlements" \
+  --sign "$identity" \
+  "$binary"
+
+/usr/bin/codesign --verify --strict --verbose=2 "$binary"
+signature_details=$(/usr/bin/codesign --display --verbose=4 "$binary" 2>&1)
+printf '%s\n' "$signature_details" >&2
+
+identifier=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^Identifier=/ { print $2; exit }')
+team_identifier=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^TeamIdentifier=/ { print $2; exit }')
+authority=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^Authority=/ { print $2; exit }')
+
+if [ "$identifier" != "tech.watzon.semantouch" ] \
+  || [ "$team_identifier" != "MB5789APU7" ] \
+  || [ "$authority" != "Developer ID Application: Watzon Ventures LLc (MB5789APU7)" ]; then
+  printf '%s\n' \
+    "semantouch: unexpected signing identity: identifier=$identifier team=$team_identifier authority=$authority" >&2
+  exit 1
+fi

@@ -1,46 +1,49 @@
 ---
 name: semantouch-setup
 description: This skill should be used when the user asks to "install Semantouch", "set up macOS computer use", "fix Semantouch permissions", "debug a permission_denied error", "run semantouch doctor", or troubleshoot why the Semantouch MCP server will not start in OMP.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # Semantouch Setup
 
 Install and diagnose the Semantouch OMP integration without weakening its permission or app-policy boundaries.
 
-## Local OMP installation
+## Install the released plugin
 
-From the repository root, run:
+Install a tagged release directly:
 
 ```sh
-just omp-install
+omp plugin install github:watzon/semantouch#v0.2.0
 ```
 
-Expect this recipe to:
+Alternatively, install through the repository marketplace:
 
-1. Build the optimized Swift executable.
-2. Install it at the stable path `~/.omp/bin/semantouch`.
-3. Link the repository as the `semantouch` plugin with `omp plugin link .`.
-4. Run the installed binary's non-prompting `doctor` check.
+```sh
+omp plugin marketplace add watzon/semantouch
+omp plugin install semantouch@semantouch
+```
 
-Restart OMP after installing or changing `.mcp.json`, then inspect `/mcp list` and run `/mcp test semantouch` when interactive MCP diagnostics are available.
+Restart OMP after installation. The first MCP launch downloads the matching macOS arm64
+release binary, verifies its SHA-256 checksum, and caches it below
+`~/Library/Application Support/Semantouch/<version>/`.
 
-The plugin's `.mcp.json` starts the default binary at `~/.omp/bin/semantouch`. To use another binary without editing the plugin, start OMP with `SEMANTOUCH_BIN` set to that executable's absolute path.
+For development from a checkout, `just omp-install` builds the optimized Swift executable
+at `~/.omp/bin/semantouch`, links the repository with `omp plugin link .`, and runs the
+non-prompting `doctor` check.
+
+The plugin's `.mcp.json` selects the release, bundled, or linked-development helper for
+the installation shape. To force another binary without editing the plugin, start OMP
+with `SEMANTOUCH_BIN` set to that executable's absolute path.
 
 ## Diagnose in order
 
-1. Confirm the plugin is linked with `omp plugin list`.
-2. Confirm the executable exists at the path selected by `.mcp.json`.
-3. Run the exact executable directly:
+1. Confirm the plugin is installed and enabled with `omp plugin list`.
+2. Restart OMP so it rediscovers the plugin's MCP definition.
+3. Use `/mcp list` to confirm the `semantouch` server source and `/mcp test semantouch`
+   to exercise its stdio handshake.
+4. Run `/semantouch-doctor` or call the MCP `doctor` tool. Use its `helper.path` as the
+   authoritative executable path for direct `--version` / `doctor` checks and TCC grants.
 
-   ```sh
-   ~/.omp/bin/semantouch --version
-   ~/.omp/bin/semantouch doctor
-   ```
-
-4. Restart or reload OMP so it rediscovers the plugin's MCP definition.
-5. Use `/mcp list` to confirm the `semantouch` server source and `/mcp test semantouch` to exercise its stdio handshake.
-6. Call the MCP server's `doctor` tool and compare its `helper.path` with the executable that received macOS permissions.
 
 Do not debug tool behavior until the server connects and `doctor` reports the required grants independently.
 
@@ -57,7 +60,10 @@ Do not attempt to automate System Settings privacy panes. Security and authentic
 
 After changing a grant, fully restart OMP so the MCP child process is relaunched. Re-run `doctor` until both grants are `granted` and `ready` is `true`.
 
-TCC associates grants with the executable path and code identity. Rebuilding elsewhere, moving the binary, or changing its signature can invalidate an earlier grant. The `omp-install` recipe preserves a stable installed path, but a new build may still require the grant to be toggled or re-added. Trust the current `doctor.helper.path`, not a remembered build path.
+TCC associates grants with the executable path and code identity. Each released version
+uses a versioned cache path; rebuilding, upgrading, moving the binary, or changing its
+signature can require the grant to be toggled or re-added. Trust the current
+`doctor.helper.path`, not a remembered path.
 
 ## Distinguish permission, connection, and policy failures
 
@@ -86,7 +92,7 @@ explicitly approve the policy change.
 
 Consider setup complete only when all of these hold:
 
-- OMP lists the linked `semantouch` plugin.
+- OMP lists the installed and enabled `semantouch` plugin.
 - OMP discovers and connects the `semantouch` MCP server.
 - The server exposes its fourteen expected tools.
 - `doctor` reports the installed helper path and both required grants accurately.

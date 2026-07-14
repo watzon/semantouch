@@ -82,16 +82,15 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(Packaging.manifest(command: "/x").permissions.allSatisfy { $0.required })
     }
 
-    func testManifestIdentityAndPlaceholderBundleId() {
+    func testManifestUsesPublisherBundleId() {
         let manifest = Packaging.manifest(command: "/x")
         XCTAssertEqual(manifest.name, "semantouch")
         XCTAssertEqual(manifest.minimumMacOS, "14.4")
         XCTAssertEqual(manifest.architectures, ["arm64"])
         XCTAssertEqual(manifest.mcpProtocolVersion, MCPServer.mcpProtocolVersion)
         XCTAssertEqual(manifest.contractVersion, MCPServer.contractVersion)
-        XCTAssertTrue(manifest.bundleIdIsPlaceholder)
-        // Clean-room / no-masquerade: never an Apple or OpenAI namespace.
-        XCTAssertEqual(manifest.bundleId, "dev.watzon.semantouch")
+        XCTAssertFalse(manifest.bundleIdIsPlaceholder)
+        XCTAssertEqual(manifest.bundleId, "tech.watzon.semantouch")
         XCTAssertFalse(manifest.bundleId.hasPrefix("com.apple."))
         XCTAssertFalse(manifest.bundleId.hasPrefix("com.openai."))
     }

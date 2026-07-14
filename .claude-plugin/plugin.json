@@ -1,0 +1,17 @@
+{
+  "name": "semantouch",
+  "version": "0.2.0",
+  "description": "Native macOS computer use through a local MCP server.",
+  "author": {
+    "name": "Watzon"
+  },
+  "homepage": "https://github.com/watzon/semantouch",
+  "repository": "https://github.com/watzon/semantouch",
+  "license": "MIT",
+  "keywords": [
+    "accessibility",
+    "computer-use",
+    "macos",
+    "mcp"
+  ]
+}
