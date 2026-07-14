@@ -33,7 +33,8 @@ let usage = """
 
     SUBCOMMANDS:
       mcp                          Run the stdio MCP server (stdout = JSON-RPC only).
-      doctor [--json]              Report Accessibility / Screen Recording status.
+      doctor [--json]              Report permissions and GitHub update availability.
+      update [--json]              Install the latest verified GitHub release in place.
       list-apps [--json]           List running applications and window counts.
       config [options]             Print the OMP MCP server config (JSON) for this
                                    helper. Options:
@@ -129,8 +130,25 @@ func report(_ error: Error) {
 
 func runDoctor(_ options: Options) -> Int32 {
     let result = DoctorService.run(requestOnboarding: false)
+    let updateResult: Result<UpdateCheck, Error> = blockOn {
+        .success(await UpdateService().check(currentVersion: result.helper.version))
+    }
+    let update: UpdateCheck
+    switch updateResult {
+    case let .success(check):
+        update = check
+    case let .failure(error):
+        update = UpdateCheck(
+            currentVersion: result.helper.version,
+            latestVersion: nil,
+            status: .unknown,
+            message: error.localizedDescription
+        )
+    }
+
     if options.has("json") {
-        if let json = try? CanonicalJSON.encodeToString(result) {
+        let report = DoctorCommandReport(doctor: result, update: update)
+        if let json = try? CanonicalJSON.encodeToString(report) {
             printOut(json)
         } else {
             printError("doctor: failed to encode result")
@@ -144,6 +162,14 @@ func runDoctor(_ options: Options) -> Int32 {
     printOut("accessibility:   \(result.accessibility.rawValue)")
     printOut("screenRecording: \(result.screenRecording.rawValue)")
     printOut("ready:           \(result.ready)")
+    switch update.status {
+    case .available:
+        printOut("update:          available (v\(update.latestVersion ?? "unknown"); run `semantouch update`)")
+    case .upToDate:
+        printOut("update:          up to date (v\(update.currentVersion))")
+    case .unknown:
+        printOut("update:          unknown (\(update.message ?? "GitHub check failed"))")
+    }
     if result.remediation.isEmpty {
         printOut("remediation:     (none)")
     } else {
@@ -206,6 +232,49 @@ func runConfig(_ options: Options) -> Int32 {
         return 0
     } catch {
         printError("config: failed to encode result: \(error)")
+        return 1
+    }
+}
+
+// MARK: - update
+
+func runUpdate(_ options: Options) -> Int32 {
+    let executablePath = URL(fileURLWithPath: DoctorService.helperPath())
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+        .path
+    if !options.has("json") {
+        printError("update: checking GitHub for the latest release...")
+    }
+
+    let result = blockOn {
+        do {
+            return .success(try await UpdateService().installLatest(executablePath: executablePath))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    switch result {
+    case let .success(update):
+        if options.has("json") {
+            guard let json = try? CanonicalJSON.encodeToString(update) else {
+                printError("update: failed to encode result")
+                return 1
+            }
+            printOut(json)
+        } else if update.updated {
+            printOut("updated:         v\(update.previousVersion) → v\(update.version)")
+            printOut("helper:          \(update.path)")
+            printOut("next:            restart clients that are running Semantouch.")
+        } else {
+            printOut("update:          already up to date (v\(update.version))")
+            printOut("helper:          \(update.path)")
+        }
+        return 0
+
+    case let .failure(error):
+        printError("update: \(error.localizedDescription)")
         return 1
     }
 }
@@ -328,6 +397,9 @@ func run(_ arguments: [String]) -> Int32 {
 
     case "doctor":
         return runDoctor(Options(rest))
+
+    case "update":
+        return runUpdate(Options(rest))
 
     case "list-apps":
         return runListApps(Options(rest))

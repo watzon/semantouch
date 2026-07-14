@@ -1,7 +1,7 @@
 ---
 name: semantouch-setup
 description: This skill should be used when the user asks to "install Semantouch", "set up macOS computer use", "fix Semantouch permissions", "debug a permission_denied error", "run semantouch doctor", or troubleshoot why the Semantouch MCP server will not start in OMP.
-version: 0.2.0
+version: 0.2.1
 ---
 
 # Semantouch Setup
@@ -13,7 +13,7 @@ Install and diagnose the Semantouch OMP integration without weakening its permis
 Install a tagged release directly:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.2.0
+omp plugin install github:watzon/semantouch#v0.2.1
 ```
 
 Alternatively, install through the repository marketplace:
@@ -31,21 +31,31 @@ For development from a checkout, `just omp-install` builds the optimized Swift e
 at `~/.omp/bin/semantouch`, links the repository with `omp plugin link .`, and runs the
 non-prompting `doctor` check.
 
-The plugin's `.mcp.json` selects the release, bundled, or linked-development helper for
-the installation shape. To force another binary without editing the plugin, start OMP
-with `SEMANTOUCH_BIN` set to that executable's absolute path.
+## Resolve the helper when MCP is unavailable
+
+Use the same launcher precedence as `.mcp.json`; do not choose the newest-looking cache directory:
+
+1. Select the first plugin root whose `scripts/semantouch` launcher is executable: `OMP_PLUGIN_ROOT`, then `CLAUDE_PLUGIN_ROOT`, then the real (non-symlink) directory `~/.omp/plugins/node_modules/semantouch`.
+2. If a launcher was selected, run `<plugin-root>/scripts/semantouch doctor --json`. The launcher itself selects `SEMANTOUCH_BIN` when set, then `<plugin-root>/bin/semantouch`, then the version from `<plugin-root>/package.json` under `${SEMANTOUCH_INSTALL_ROOT:-$HOME/Library/Application Support/Semantouch}/<version>/semantouch`. It downloads that pinned release when the cache is absent. Trust the returned `helper.path` as the exact executable.
+3. If no plugin launcher exists, run `${SEMANTOUCH_BIN}` when it names an executable; otherwise try `~/.omp/bin/semantouch`. Verify the chosen executable with `--version`, then run its `doctor --json`.
+4. If none of these candidates is runnable, report that update status cannot yet be checked. Perform only the minimum plugin/helper connection repair needed to obtain a runnable doctor, then return to this gate immediately before permissions or other setup work.
+
+## Mandatory update-consent gate
+
+Inspect `update.status` before debugging, changing permissions, restarting clients, or continuing setup. If it is `available`, stop the setup workflow immediately and ask one blocking question with exactly two choices: **Update now** or **Continue without updating**. A setup request or doctor invocation is not authorization to update.
+
+Wait for the user's explicit answer. On **Update now**, follow `/semantouch-update`, restart affected clients, re-run doctor, and only then resume setup. On **Continue without updating**, resume with the current helper. Never infer consent, choose for the user, update automatically, or continue setup while the question is unanswered. If no interactive question tool is available, ask in chat and end the turn. An `unknown` status is not a permission or readiness failure; report the failed GitHub check and continue using the local result.
 
 ## Diagnose in order
 
-1. Confirm the plugin is installed and enabled with `omp plugin list`.
-2. Restart OMP so it rediscovers the plugin's MCP definition.
-3. Use `/mcp list` to confirm the `semantouch` server source and `/mcp test semantouch`
-   to exercise its stdio handshake.
-4. Run `/semantouch-doctor` or call the MCP `doctor` tool. Use its `helper.path` as the
-   authoritative executable path for direct `--version` / `doctor` checks and TCC grants.
+1. Run `/semantouch-doctor` immediately. If the MCP server is unavailable, use the helper-resolution procedure above and run `doctor --json`.
+2. Complete the mandatory update-consent gate before doing anything else.
+3. Only after the gate allows continuation, confirm the plugin is installed and enabled with `omp plugin list`.
+4. Restart OMP if needed so it rediscovers the plugin's MCP definition.
+5. Use `/mcp list` to confirm the `semantouch` server source and `/mcp test semantouch` to exercise its stdio handshake.
+6. Use `doctor.helper.path` as the authoritative executable path for direct `--version`, later doctor checks, and TCC grants.
 
-
-Do not debug tool behavior until the server connects and `doctor` reports the required grants independently.
+Do not debug tool behavior until the gate allows continuation, the server connects, and doctor reports the required grants independently.
 
 ## macOS permissions
 

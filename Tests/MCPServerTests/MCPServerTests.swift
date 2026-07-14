@@ -12,7 +12,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(MCPServer.serverName, "semantouch")
         XCTAssertEqual(MCPServer.mcpProtocolVersion, "2025-06-18")
         XCTAssertEqual(MCPServer.contractVersion, "semantouch/1")
-        XCTAssertEqual(MCPServer.serverVersion, "0.2.0")
+        XCTAssertEqual(MCPServer.serverVersion, "0.2.1")
     }
 
     func testHandledMethodSet() {
@@ -39,7 +39,7 @@ final class MCPServerTests: XCTestCase {
         let response = server.process(request(id: 1, method: "initialize", params: "{}"))
         XCTAssertEqual(
             response,
-            #"{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2025-06-18","serverInfo":{"name":"semantouch","version":"0.2.0"}}}"#
+            #"{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2025-06-18","serverInfo":{"name":"semantouch","version":"0.2.1"}}}"#
         )
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "semantouch",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Native macOS computer use through a local MCP server.",
   "author": {
     "name": "Watzon"

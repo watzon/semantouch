@@ -32,7 +32,7 @@ proprietary computer-use binaries.
 - Apple Silicon Mac
 - macOS 14.4 or later
 - [OMP](https://github.com/can1357/oh-my-pi)
-- Network access the first time a released helper version starts
+- Network access for released-helper downloads and GitHub update checks
 
 A Swift toolchain and `just` are needed only for source builds and development.
 
@@ -41,7 +41,7 @@ A Swift toolchain and `just` are needed only for source builds and development.
 Install a tagged release directly:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.2.0
+omp plugin install github:watzon/semantouch#v0.2.1
 ```
 
 Alternatively, add this repository as a marketplace and install its catalog entry:
@@ -56,7 +56,7 @@ ID-signed and notarized `semantouch-macos-arm64` release asset, verifies its SHA
 checksum, and caches it at:
 
 ```text
-~/Library/Application Support/Semantouch/0.2.0/semantouch
+~/Library/Application Support/Semantouch/0.2.1/semantouch
 ```
 
 The plugin provides `.mcp.json`, the `semantouch` and `semantouch-setup` skills, and the
@@ -139,13 +139,22 @@ For schemas, examples, revision semantics, and focus behavior, read
 | Command | Purpose |
 | --- | --- |
 | `semantouch mcp` | Run the stdio MCP server. Standard output is reserved for JSON-RPC. |
-| `semantouch doctor [--json]` | Report Accessibility and Screen Recording status. |
+| `semantouch doctor [--json]` | Report permissions and GitHub update availability. |
+| `semantouch update [--json]` | Publisher-, checksum-, and version-verify the latest GitHub release, then atomically install it at the current helper path. |
 | `semantouch list-apps [--json]` | List running applications and their window counts. |
 | `semantouch config [options]` | Generate an MCP server config or plugin manifest. |
 | `semantouch probe <kind> ...` | Run low-level capture and accessibility diagnostics. |
 | `semantouch --version` | Print the helper, contract, and MCP protocol versions. |
 
-Run `semantouch --help` for all `config` and `probe` options.
+`doctor` remains successful when GitHub is unavailable and reports the update status as
+`unknown`. Agent workflows never treat an available release as permission to update:
+they stop and ask the user to choose **Update now** or **Continue without updating**
+before doing anything else.
+
+`update` writes progress and failures to standard error; `--json` keeps its result on
+standard output for agents. A successful update preserves the helper path, then takes
+effect when Semantouch clients restart. Run `semantouch --help` for all `config` and
+`probe` options.
 
 ## Runtime configuration
 

@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Native macOS computer use plugins.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "semantouch",
       "description": "Native macOS computer use through a local MCP server.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "source": "./",
       "category": "development",
       "homepage": "https://github.com/watzon/semantouch",

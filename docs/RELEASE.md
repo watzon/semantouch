@@ -26,8 +26,8 @@ scripts/verify-release-metadata "$(swift build -c release --show-bin-path)/seman
 Create and push a matching `v<version>` tag:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The workflow rejects a tag that does not exactly match the package and binary version.
@@ -116,7 +116,7 @@ Suggested `Info.plist` keys for the `.app`:
 ```xml
 <key>CFBundleIdentifier</key>        <string>tech.watzon.semantouch</string>
 <key>CFBundleExecutable</key>        <string>semantouch</string>
-<key>CFBundleShortVersionString</key> <string>0.2.0</string>                        <!-- match MCPServer.serverVersion -->
+<key>CFBundleShortVersionString</key> <string>0.2.1</string>                        <!-- match MCPServer.serverVersion -->
 <key>LSMinimumSystemVersion</key>    <string>14.4</string>
 <key>LSUIElement</key>               <true/>   <!-- background/accessory: no Dock icon, no menu bar -->
 ```

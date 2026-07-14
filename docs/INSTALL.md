@@ -8,7 +8,7 @@ signing, and notarization details.
 
 - macOS **14.4** or later, Apple Silicon (arm64).
 - OMP.
-- Network access when a released helper version is downloaded for the first time.
+- Network access when a released helper is downloaded or checked for updates.
 
 A Swift 6 toolchain (Xcode 16+ or matching Swift.org toolchain) and `just` are required
 only for source builds. The Swift package has zero external dependencies.
@@ -18,7 +18,7 @@ only for source builds. The Swift package has zero external dependencies.
 Install a specific release:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.2.0
+omp plugin install github:watzon/semantouch#v0.2.1
 ```
 
 Or use the repository's OMP/Claude-compatible marketplace catalog:
@@ -32,7 +32,7 @@ Restart OMP. The first MCP launch downloads `semantouch-macos-arm64` and its che
 the matching GitHub release, verifies the binary, and installs it at the versioned path:
 
 ```text
-~/Library/Application Support/Semantouch/0.2.0/semantouch
+~/Library/Application Support/Semantouch/0.2.1/semantouch
 ```
 
 Then check:
@@ -46,6 +46,38 @@ Then check:
 Grant Accessibility and Screen Recording to the exact helper path reported by `doctor`.
 Each release has a new path and code signature, so macOS can require both grants again
 after an upgrade.
+
+### Check for and install updates
+
+The CLI doctor report checks GitHub's latest published release without changing its
+permission result:
+
+```sh
+semantouch doctor
+semantouch doctor --json
+```
+
+If an update is available, install it with:
+
+```sh
+semantouch update
+# Machine-readable result:
+semantouch update --json
+```
+
+Agent-driven doctor workflows do not update automatically. When the report says an
+update is available, the agent stops the active workflow and asks the user to choose
+**Update now** or **Continue without updating**. Doctor, setup, and computer-use requests
+do not imply update consent.
+
+The updater downloads the release binary and its published SHA-256 checksum, verifies
+the checksum, Developer ID publisher identity, and binary-reported version, and then
+atomically replaces the exact helper executable that is running the command. The path
+does not change, so existing Accessibility and Screen Recording entries normally
+continue to identify the same helper. Restart OMP or any other Semantouch client after
+an update. A later OMP
+plugin upgrade can move the helper to a new versioned path; if it does, grant permissions
+to the new path reported by `doctor`.
 
 For local development, `just omp-install` still builds the release executable, installs
 it at `~/.omp/bin/semantouch`, links the checkout with `omp plugin link .`, and runs the
@@ -73,7 +105,7 @@ Verify the build:
 
 ```sh
 "$(swift build -c release --show-bin-path)/semantouch" --version
-# semantouch 0.2.0 (contract semantouch/1, MCP 2025-06-18)
+# semantouch 0.2.1 (contract semantouch/1, MCP 2025-06-18)
 ```
 
 ### Where to put the binary
@@ -109,7 +141,7 @@ Example output:
 ```
 helper:          /Users/you/.../.build/arm64-apple-macosx/release/semantouch
   signed:        true
-  version:       0.2.0
+  version:       0.2.1
 accessibility:   denied
 screenRecording: denied
 ready:           false

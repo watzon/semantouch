@@ -1,16 +1,24 @@
 ---
 name: semantouch
 description: This skill should be used when the user asks to "control a Mac app", "click a button in an app", "inspect a native app window", "type into a macOS application", "take a screenshot of an app window", or otherwise read or operate local Mac UI through the Semantouch MCP server.
-version: 0.2.0
+version: 0.2.1
 ---
 
 # Semantouch
 
 Operate local Mac applications through the `semantouch` MCP server. Prefer a dedicated tool or skill when it exposes the requested operation directly; use Semantouch for app interactions available only through live UI. Prefer the accessibility hierarchy and semantic actions over coordinate input. Treat screenshots as visual evidence, not as the primary targeting mechanism.
 
+## Mandatory update-consent gate
+
+Before the first computer-use operation in a session when readiness is unknown, call the MCP `doctor` tool, then run the exact executable from `doctor.helper.path` with `doctor --json` to obtain the read-only GitHub update status. Inspect `update.status` before checking permissions or continuing the user's task.
+
+If `update.status` is `available`, stop the workflow immediately and ask one blocking question with exactly two choices: **Update now** or **Continue without updating**. Do not treat the original computer-use request, setup request, or doctor invocation as update authorization. Do not call another computer-use tool until the user answers. On **Update now**, follow `/semantouch-update`, restart affected clients, re-run doctor, then resume. On **Continue without updating**, proceed with the current helper. Never choose for the user or update automatically. If no interactive question tool is available, ask in chat and end the turn.
+
+An `unknown` update status is not a readiness or permission failure; continue with the local doctor result and report the check failure when relevant.
+
 ## Core workflow
 
-1. Call the server's `doctor` tool before the first computer-use operation in a session when readiness is unknown. If either required grant is missing, stop app interaction and load `skill://semantouch-setup`.
+1. Complete the mandatory update-consent gate above. If either required grant is then missing, stop app interaction and load `skill://semantouch-setup`.
 2. Call `list_apps` when the target is ambiguous. Select by bundle identifier when available; otherwise use display name, absolute `.app` path, or `pid:<pid>`.
 3. Call `get_app_state` once at the start of the assistant turn. On the first call, omit `windowId` (or pass `0`) so the server auto-selects the best window. Treat `list_apps.windows` as a count, never an id or ordinal; pass a positive `windowId` only when it came from an earlier successful `get_app_state` response's `window.id`. Retain the returned `app`, `sessionId`, `revision`, element ids, tree, and screenshot metadata as one snapshot.
 4. Read the accessibility tree before acting. Use roles, labels, values, enabled state, and declared actions to identify the target. Never derive meaning from an element-id number.

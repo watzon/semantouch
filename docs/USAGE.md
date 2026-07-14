@@ -46,7 +46,7 @@ text block). Error codes are listed in [PROTOCOL.md](PROTOCOL.md) §6.
 {}                          // or { "requestOnboarding": false }
 // payload
 {
-  "helper": { "path": "/…/semantouch", "signed": true, "version": "0.2.0" },
+  "helper": { "path": "/…/semantouch", "signed": true, "version": "0.2.1" },
   "accessibility": "granted",
   "screenRecording": "granted",
   "ready": true,
