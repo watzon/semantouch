@@ -182,21 +182,21 @@ public final class UserInterruptionMonitor: InterruptionMonitoring, @unchecked S
         // Cover every physical key/mouse event that signals genuine user activity. Middle/side
         // buttons (`otherMouse*`) and the right/other button-up events are included so any
         // physical button press arms interruption even when the pointer never moves.
-        let mask: CGEventMask =
-            (1 << CGEventType.keyDown.rawValue) |
-            (1 << CGEventType.keyUp.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue) |
-            (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.leftMouseUp.rawValue) |
-            (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseUp.rawValue) |
-            (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.otherMouseDown.rawValue) |
-            (1 << CGEventType.otherMouseUp.rawValue) |
-            (1 << CGEventType.otherMouseDragged.rawValue) |
-            (1 << CGEventType.mouseMoved.rawValue) |
-            (1 << CGEventType.scrollWheel.rawValue)
+        var mask: CGEventMask = 0
+        mask |= CGEventMask(1) << CGEventType.keyDown.rawValue
+        mask |= CGEventMask(1) << CGEventType.keyUp.rawValue
+        mask |= CGEventMask(1) << CGEventType.flagsChanged.rawValue
+        mask |= CGEventMask(1) << CGEventType.leftMouseDown.rawValue
+        mask |= CGEventMask(1) << CGEventType.leftMouseUp.rawValue
+        mask |= CGEventMask(1) << CGEventType.leftMouseDragged.rawValue
+        mask |= CGEventMask(1) << CGEventType.rightMouseDown.rawValue
+        mask |= CGEventMask(1) << CGEventType.rightMouseUp.rawValue
+        mask |= CGEventMask(1) << CGEventType.rightMouseDragged.rawValue
+        mask |= CGEventMask(1) << CGEventType.otherMouseDown.rawValue
+        mask |= CGEventMask(1) << CGEventType.otherMouseUp.rawValue
+        mask |= CGEventMask(1) << CGEventType.otherMouseDragged.rawValue
+        mask |= CGEventMask(1) << CGEventType.mouseMoved.rawValue
+        mask |= CGEventMask(1) << CGEventType.scrollWheel.rawValue
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         let created = CGEvent.tapCreate(
