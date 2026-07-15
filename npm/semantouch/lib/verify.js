@@ -122,6 +122,14 @@ function codesignField(details, field) {
     if (line.startsWith(prefix)) {
       return line.slice(prefix.length).trim();
     }
+
+    const embeddedIndex = line.indexOf(` ${prefix}`);
+    if (embeddedIndex >= 0) {
+      return line
+        .slice(embeddedIndex + prefix.length + 1)
+        .trim()
+        .split(/\s+/, 1)[0];
+    }
   }
   return '';
 }

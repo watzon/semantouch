@@ -534,7 +534,7 @@ function createSuccessfulVerifyRun(version, overrides = {}) {
         `Authority=${authority}`,
       ];
       if (flags != null && flags !== '') {
-        lines.push(`flags=${flags}`);
+        lines.push(`CodeDirectory v=20500 size=309 flags=${flags} hashes=3+3 location=embedded`);
       }
       if (timestamp != null && timestamp !== '') {
         lines.push(`Timestamp=${timestamp}`);
