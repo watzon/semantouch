@@ -1026,7 +1026,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "semantouch-adapter"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "semantouch-protocol",
  "serde",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "semantouch-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "hex",
  "indexmap",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "semantouch-linux"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ashpd",
  "atspi",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "semantouch-protocol"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "semantouch-runtime"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "parking_lot",
  "semantouch-adapter",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "semantouch-windows"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "semantouch-adapter",
  "semantouch-protocol",
