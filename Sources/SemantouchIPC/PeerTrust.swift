@@ -31,6 +31,22 @@ public struct PeerIdentity: Equatable, Sendable {
         self.teamIdentifier = teamIdentifier
         self.executablePath = executablePath
     }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        let auditTokensEqual = withUnsafeBytes(of: lhs.auditToken) { lhsBytes in
+            withUnsafeBytes(of: rhs.auditToken) { rhsBytes in
+                lhsBytes.elementsEqual(rhsBytes)
+            }
+        }
+
+        return lhs.euid == rhs.euid
+            && lhs.egid == rhs.egid
+            && lhs.pid == rhs.pid
+            && auditTokensEqual
+            && lhs.codeIdentifier == rhs.codeIdentifier
+            && lhs.teamIdentifier == rhs.teamIdentifier
+            && lhs.executablePath == rhs.executablePath
+    }
 }
 
 /// Expected peer policy for mutual authentication.

@@ -24,6 +24,31 @@ final class HostClientAndRelayTests: XCTestCase {
         try SocketLocation.make(userTempDirectory: tempRoot, euid: euid)
     }
 
+    func testPeerIdentityEqualityIncludesAuditToken() {
+        var firstToken = audit_token_t()
+        var secondToken = audit_token_t()
+        firstToken.val.0 = 1
+        secondToken.val.0 = 2
+
+        let first = PeerIdentity(
+            euid: 501,
+            egid: 20,
+            pid: 42,
+            auditToken: firstToken,
+            codeIdentifier: "tech.watzon.semantouch",
+            teamIdentifier: "MB5789APU7",
+            executablePath: "/Applications/Semantouch.app/Contents/MacOS/SemantouchHost"
+        )
+        var same = first
+        var differentToken = first
+        differentToken.auditToken = secondToken
+
+        XCTAssertEqual(first, same)
+        same.executablePath = "/tmp/SemantouchHost"
+        XCTAssertNotEqual(first, same)
+        XCTAssertNotEqual(first, differentToken)
+    }
+
     func testBoundedRetryEventuallyConnects() throws {
         let location = try makeLocation()
         let policy = ConnectRetryPolicy(
