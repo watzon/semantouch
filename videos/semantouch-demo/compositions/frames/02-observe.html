@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>02-observe</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #173d2a;
+          font-family: sans-serif;
+          background-color: #f2efe5;
+          background-image:
+            linear-gradient(rgba(77, 245, 69, 0.1) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(77, 245, 69, 0.1) 1px, transparent 1px);
+          background-size: 38.4px 38.4px;
+        }
+        .hairline {
+          position: absolute;
+          left: 76.8px;
+          right: 76.8px;
+          border-top: 2.3px solid #173d2a;
+        }
+        .hairline.top {
+          top: 57.6px;
+        }
+        .hairline.bottom {
+          bottom: 57.6px;
+        }
+        .kicker {
+          position: absolute;
+          top: 90px;
+          left: 96px;
+          font-family: sans-serif;
+          font-weight: 600;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          font-size: 13px;
+        }
+        .title {
+          position: absolute;
+          top: 130px;
+          left: 96px;
+          font-family: serif;
+          font-size: 48px;
+          line-height: 1.05;
+          max-width: 720px;
+        }
+        .left {
+          position: absolute;
+          top: 240px;
+          left: 96px;
+          width: 720px;
+        }
+        .row {
+          display: grid;
+          grid-template-columns: 140px 1fr;
+          gap: 16px;
+          padding: 14px 0;
+          border-bottom: 1px solid rgba(77, 245, 69, 0.18);
+          font-family: monospace;
+          font-size: 15px;
+        }
+        .row .lab {
+          opacity: 0.55;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          font-size: 12px;
+          font-family: sans-serif;
+          font-weight: 600;
+        }
+        .right {
+          position: absolute;
+          top: 220px;
+          right: 96px;
+          width: 880px;
+          height: 560px;
+        }
+        .win {
+          position: absolute;
+          inset: 40px 40px 80px 40px;
+          border: 2px solid #173d2a;
+          background: #f2efe5;
+          overflow: hidden;
+        }
+        .win-title {
+          height: 36px;
+          border-bottom: 1px solid #173d2a;
+          display: flex;
+          align-items: center;
+          padding: 0 14px;
+          font-family: monospace;
+          font-size: 13px;
+        }
+        .win-body {
+          padding: 28px;
+          font-family: monospace;
+          font-size: 14px;
+          line-height: 1.6;
+        }
+        .cover {
+          position: absolute;
+          inset: 20px 20px 60px 60px;
+          background: #ff7a18;
+          opacity: 0;
+        }
+        .capture {
+          position: absolute;
+          left: 80px;
+          top: 80px;
+          width: 620px;
+          height: 360px;
+          border: 2px solid #4df545;
+          background: #f2efe5;
+          box-shadow: 12px 12px 0 rgba(23, 61, 42, 0.08);
+          opacity: 0;
+          transform: translate(0, 0);
+        }
+        .capture-meta {
+          position: absolute;
+          left: 14px;
+          bottom: 12px;
+          font-family: monospace;
+          font-size: 12px;
+          color: #1f6b1c;
+          letter-spacing: 0.06em;
+        }
+        .rail {
+          position: absolute;
+          left: 96px;
+          right: 96px;
+          bottom: 96px;
+          font-family: monospace;
+          font-size: 14px;
+          display: flex;
+          gap: 36px;
+          border-top: 2px solid #173d2a;
+          padding-top: 14px;
+        }
+        .ok {
+          color: #1f6b1c;
+        }
+      </style>
+
+      <div id="root" data-composition-id="02-observe" data-width="1920" data-height="1080" data-duration="6">
+        <div class="hairline top"></div>
+        <div class="hairline bottom"></div>
+        <div class="kicker">02 · OBSERVE</div>
+        <div class="title">Policy-gated launch.<br />Covered-window capture.</div>
+        <div class="left" id="o2-left">
+          <div class="row">
+            <div class="lab">Tool</div>
+            <div>launch_app</div>
+          </div>
+          <div class="row">
+            <div class="lab">App</div>
+            <div id="o2-app">—</div>
+          </div>
+          <div class="row">
+            <div class="lab">Launched</div>
+            <div id="o2-launched">—</div>
+          </div>
+          <div class="row">
+            <div class="lab">Recovered</div>
+            <div id="o2-recovered">—</div>
+          </div>
+          <div class="row">
+            <div class="lab">Windows</div>
+            <div id="o2-windows">—</div>
+          </div>
+        </div>
+        <div class="right" id="o2-right">
+          <div class="win" id="o2-win">
+            <div class="win-title" id="o2-wtitle">CU Fixture</div>
+            <div class="win-body">
+              fixture.button.press<br />
+              fixture.label.count · Presses: 0<br />
+              fixture.field.text
+            </div>
+          </div>
+          <div class="cover" id="o2-cover"></div>
+          <div class="capture" id="o2-capture">
+            <div class="win-title">captured plane</div>
+            <div class="win-body">
+              ScreenCaptureKit per-window<br />
+              cover remains opaque · capture unchanged
+            </div>
+            <div class="capture-meta" id="o2-capmeta">image/jpeg · —</div>
+          </div>
+        </div>
+        <div class="rail" id="o2-rail">
+          <div>launch_app → <span class="ok" id="o2-launch-status">—</span></div>
+          <div>screenshot → <span class="ok" id="o2-shot-status">—</span></div>
+          <div>run <span id="o2-run">—</span></div>
+        </div>
+      </div>
+
+      <script>
+        (function () {
+          const E = window.__SemantouchDemo;
+          const step = E.frameById("02-observe");
+          const evidence = E.getEvidence();
+          const launch = E.claim(step, "launch_app");
+          const shot = E.claim(step, "screenshot");
+          E.text(document.getElementById("o2-app"), launch.app.displayName);
+          E.text(document.getElementById("o2-launched"), String(launch.launched));
+          E.text(document.getElementById("o2-recovered"), String(launch.recovered));
+          E.text(document.getElementById("o2-windows"), String(launch.app.windows));
+          E.text(
+            document.getElementById("o2-capmeta"),
+            shot.mimeType + " · " + shot.width + "×" + shot.height,
+          );
+          E.text(
+            document.getElementById("o2-launch-status"),
+            launch.launched ? "launched" : launch.recovered ? "recovered" : "active",
+          );
+          E.text(document.getElementById("o2-shot-status"), shot.mimeType);
+          E.text(document.getElementById("o2-run"), evidence.runId);
+
+          window.__timelines = window.__timelines || {};
+          const tl = gsap.timeline({ paused: true });
+          tl.fromTo("#o2-left .row", { opacity: 0, x: -24 }, { opacity: 1, x: 0, duration: 0.45, stagger: 0.08, ease: "power2.out" }, 0.15);
+          tl.fromTo("#o2-win", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.35);
+          tl.fromTo("#o2-cover", { opacity: 0, x: 40 }, { opacity: 1, x: 0, duration: 0.7, ease: "power2.inOut" }, 1.9);
+          tl.fromTo(
+            "#o2-capture",
+            { opacity: 0, x: 0, y: 0, scale: 0.98 },
+            { opacity: 1, x: 40, y: -30, scale: 1, duration: 0.85, ease: "power3.out" },
+            3.0,
+          );
+          tl.fromTo("#o2-rail", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.45 }, 4.5);
+          window.__timelines["02-observe"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>

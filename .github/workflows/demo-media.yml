@@ -1,0 +1,259 @@
+name: Demo media
+
+# Manually triggered only. Regenerates machine-readable demo evidence,
+# validates the HyperFrames composition, and optionally renders an MP4
+# artifact. Never publishes externally.
+on:
+  workflow_dispatch:
+    inputs:
+      render:
+        description: "Attempt HyperFrames render (requires browser + ffmpeg on runner)"
+        required: false
+        type: boolean
+        default: true
+      live_evidence:
+        description: "Attempt live doctor-supplemented evidence (falls back offline)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-media-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo-media:
+    name: Evidence + composition (+ optional render)
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Install locked demo dependencies
+        shell: bash
+        working-directory: videos/semantouch-demo
+        run: npm ci
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -m
+          node --version
+          npm --version
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -n 1
+          else
+            echo "ffmpeg: not installed (render may fall back or fail)"
+          fi
+          if command -v swift >/dev/null 2>&1; then
+            swift --version | head -n 2
+          fi
+
+      - name: Syntax-check evidence recorder
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check scripts/record-demo-evidence.mjs
+
+      - name: Record demo evidence
+        id: evidence
+        shell: bash
+        env:
+          LIVE: ${{ inputs.live_evidence }}
+        run: |
+          set -euo pipefail
+          mkdir -p videos/semantouch-demo/evidence videos/semantouch-demo/assets dist/demo-media
+          if [[ "$LIVE" == "true" ]]; then
+            node scripts/record-demo-evidence.mjs --live
+          else
+            node scripts/record-demo-evidence.mjs
+          fi
+          node scripts/record-demo-evidence.mjs --check
+          # Copy evidence into the artifact staging dir.
+          cp videos/semantouch-demo/evidence/demo-evidence.json dist/demo-media/
+          cp videos/semantouch-demo/assets/demo-evidence.js dist/demo-media/
+          # Machine-readable summary for the job log.
+          node -e '
+            const e = require("./videos/semantouch-demo/evidence/demo-evidence.json");
+            const summary = {
+              runId: e.runId,
+              mode: e.mode,
+              packageVersion: e.packageVersion,
+              toolCount: e.tools.count,
+              sequenceFrames: e.sequence.length,
+              integrity: e.integrity.digest,
+              sample: e.sample,
+            };
+            console.log(JSON.stringify(summary, null, 2));
+            require("node:fs").writeFileSync(
+              "dist/demo-media/summary.json",
+              JSON.stringify(summary, null, 2) + "\n",
+            );
+          '
+
+      - name: Validate composition structure (no browser)
+        id: structure
+        shell: bash
+        working-directory: videos/semantouch-demo
+        run: |
+          set -euo pipefail
+          test -f index.html
+          test -f evidence/demo-evidence.json
+          test -f assets/demo-evidence.js
+          test -f assets/evidence-ui.js
+          for f in 01-hook 02-observe 03-act 04-prove 05-wait 06-yield 07-close; do
+            test -f "compositions/frames/${f}.html"
+          done
+          # Host slot ids must match sub-comp data-composition-id values.
+          node -e '
+            const fs = require("node:fs");
+            const index = fs.readFileSync("index.html", "utf8");
+            const ids = ["01-hook","02-observe","03-act","04-prove","05-wait","06-yield","07-close"];
+            for (const id of ids) {
+              if (!index.includes(`data-composition-id="${id}"`)) {
+                console.error("index.html missing host slot for", id);
+                process.exit(1);
+              }
+              if (!index.includes(`data-composition-src="compositions/frames/${id}.html"`)) {
+                console.error("index.html missing src for", id);
+                process.exit(1);
+              }
+              const html = fs.readFileSync(`compositions/frames/${id}.html`, "utf8");
+              if (!html.includes("<template>")) {
+                console.error(id, "missing <template> wrapper");
+                process.exit(1);
+              }
+              if (!html.includes(`data-composition-id="${id}"`)) {
+                console.error(id, "internal data-composition-id mismatch");
+                process.exit(1);
+              }
+              if (!html.includes(`window.__timelines["${id}"]`)) {
+                console.error(id, "timeline key mismatch");
+                process.exit(1);
+              }
+            }
+            const evidence = JSON.parse(fs.readFileSync("evidence/demo-evidence.json", "utf8"));
+            if (evidence.tools.count !== 16) {
+              console.error("tools.count must be 16");
+              process.exit(1);
+            }
+            if (evidence.sample === true) {
+              console.error("sample evidence refused");
+              process.exit(1);
+            }
+            console.log("structure OK: 7 frames, 16 tools, evidence present");
+          '
+
+      - name: HyperFrames lint
+        id: lint
+        shell: bash
+        working-directory: videos/semantouch-demo
+        run: |
+          set -euo pipefail
+          npx --no-install hyperframes lint --json > ../../dist/demo-media/lint.json || {
+            echo "hyperframes lint failed" >&2
+            cat ../../dist/demo-media/lint.json >&2 || true
+            exit 1
+          }
+          echo "lint OK"
+
+      - name: HyperFrames check (browser gate)
+        id: check
+        shell: bash
+        working-directory: videos/semantouch-demo
+        run: |
+          set -euo pipefail
+          # Full browser gate: runtime + layout + motion + contrast.
+          # If the runner cannot launch Chrome, record the blocker and continue
+          # so structure/lint/evidence artifacts still upload.
+          set +e
+          npx --no-install hyperframes check --json > ../../dist/demo-media/check.json 2> ../../dist/demo-media/check.stderr
+          code=$?
+          set -e
+          if [[ "$code" -eq 0 ]]; then
+            echo "check=passed" >> "$GITHUB_OUTPUT"
+            echo "hyperframes check passed"
+          else
+            echo "check=failed" >> "$GITHUB_OUTPUT"
+            echo "hyperframes check failed (exit $code)" >&2
+            tail -n 80 ../../dist/demo-media/check.stderr >&2 || true
+            # Evidence + structure + lint already proved; surface check failure as job failure.
+            exit "$code"
+          fi
+
+      - name: Render MP4 (optional)
+        id: render
+        if: ${{ inputs.render }}
+        shell: bash
+        working-directory: videos/semantouch-demo
+        run: |
+          set -euo pipefail
+          mkdir -p ../../dist/demo-media/renders
+          out="../../dist/demo-media/renders/semantouch-demo.mp4"
+          set +e
+          npx --no-install hyperframes render --quality draft --output "$out" 2> ../../dist/demo-media/render.stderr
+          code=$?
+          set -e
+          if [[ "$code" -eq 0 && -s "$out" ]]; then
+            echo "render=passed" >> "$GITHUB_OUTPUT"
+            echo "output=$out" >> "$GITHUB_OUTPUT"
+            ls -la "$out"
+            if command -v ffprobe >/dev/null 2>&1; then
+              ffprobe -v error -show_format -show_streams "$out" > ../../dist/demo-media/renders/ffprobe.txt || true
+            fi
+          else
+            echo "render=failed" >> "$GITHUB_OUTPUT"
+            echo "hyperframes render failed (exit $code)" >&2
+            tail -n 100 ../../dist/demo-media/render.stderr >&2 || true
+            # Do not fail the whole job if only render is blocked (e.g. missing ffmpeg);
+            # evidence + validation remain the primary contract. Write a blocker note.
+            printf '%s\n' \
+              "render_blocked=true" \
+              "exit_code=$code" \
+              "note=Render failed on runner; evidence + lint + check results still uploaded." \
+              > ../../dist/demo-media/render-blocker.txt
+            # Soft-fail render only: job stays green when check already passed.
+            # If check never ran, structure/lint still ship.
+            exit 0
+          fi
+
+      - name: Package artifact tree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/demo-media
+          # Always include evidence + composition snapshot pointers.
+          {
+            echo "repo=${GITHUB_REPOSITORY}"
+            echo "sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "event=${GITHUB_EVENT_NAME}"
+            echo "recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > dist/demo-media/run-meta.txt
+          # Manifest of what landed.
+          (cd dist/demo-media && find . -type f | sort > MANIFEST.txt)
+          cat dist/demo-media/MANIFEST.txt
+
+      - name: Upload demo-media artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semantouch-demo-media
+          path: dist/demo-media/
+          if-no-files-found: error
+          retention-days: 14

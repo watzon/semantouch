@@ -20,10 +20,13 @@ public enum ToolHandlers {
     /// The handler map, keyed by tool name.
     public static func handlers(context: ServiceContext) -> [String: ToolHandler] {
         [
-            // Phase 1 — read-only.
+            // Phase 1 — read-only + explicit lifecycle launch.
             "doctor": doctorHandler(),
             "list_apps": listAppsHandler(),
+            "launch_app": launchAppHandler(context: context),
             "get_app_state": getAppStateHandler(context: context),
+            // Full-text read of one revision-checked element (never advances revision).
+            "read_text": readTextHandler(context: context),
             // v1.5 — read-only capture-only tool (§18.9).
             "screenshot": screenshotHandler(context: context),
             "end_app_session": endSessionHandler(context: context),
@@ -74,6 +77,16 @@ public enum ToolHandlers {
         }
     }
 
+    /// `launch_app`: explicit, policy-gated launch / hidden-window recovery. Never
+    /// implied by ordinary app resolution. No SnapshotOptions cascade — lifecycle only.
+    static func launchAppHandler(context: ServiceContext) -> ToolHandler {
+        { arguments in
+            let request = try decode(LaunchAppRequest.self, from: arguments)
+            let result = try await AppLauncher.launch(request, context: context)
+            return .text(try CanonicalJSON.encodeToString(result))
+        }
+    }
+
     static func getAppStateHandler(context: ServiceContext) -> ToolHandler {
         { arguments in
             let request = try decode(GetAppStateRequest.self, from: arguments)
@@ -115,6 +128,15 @@ public enum ToolHandlers {
         }
     }
 
+    /// `read_text`: revision-checked full-text AXValue read. Never advances revision.
+    static func readTextHandler(context: ServiceContext) -> ToolHandler {
+        { arguments in
+            let request = try decode(ReadTextRequest.self, from: arguments)
+            let result = try ReadTextService.run(request, context: context)
+            return .text(try CanonicalJSON.encodeToString(result))
+        }
+    }
+
     static func endSessionHandler(context: ServiceContext) -> ToolHandler {
         { arguments in
             guard let sessionId = arguments["sessionId"]?.stringValue else {
@@ -153,16 +175,19 @@ public enum ToolHandlers {
         context: ServiceContext,
         _ makeAction: @escaping (JSONValue) throws -> SemanticAction
     ) -> ToolHandler {
-        { arguments in try runSemantic(context: context, arguments: arguments, makeAction: makeAction) }
+        { arguments in try await runSemantic(context: context, arguments: arguments, makeAction: makeAction) }
     }
 
     /// Run one semantic (Phase 2) element-targeted action to completion.
+    /// On a committed mutation, cascade the caller's `SnapshotOptions` into a post-action
+    /// refresh and attach the resulting `AppState` (plus a separate image block when produced).
     static func runSemantic(
         context: ServiceContext,
         arguments: JSONValue,
         makeAction: (JSONValue) throws -> SemanticAction
-    ) throws -> ToolResult {
+    ) async throws -> ToolResult {
         let target = try decode(ElementTarget.self, from: arguments)
+        let options = try decode(SnapshotOptions.self, from: arguments)
         let action = try makeAction(arguments)
         // Reflect the action in the overlay if this session's window is
         // known. Semantic actions still move the system pointer 0px — this is a purely drawn
@@ -199,48 +224,76 @@ public enum ToolHandlers {
         } catch {
             // A rejected action (typed CUError) still returns the overlay to idle so it does
             // not stay stuck in the press state (best-effort; never affects the thrown error).
+            // Rejected paths never refresh or attach state.
             context.cursorController.finish(sessionId: target.sessionId, interrupted: false)
             throw error
         }
         context.cursorController.finish(sessionId: target.sessionId, interrupted: result.status == .interrupted)
         // Phase 3 (§15.3): a completed mutation dirties the session so the next
-        // get_app_state settles before rebuilding.
+        // get_app_state settles before rebuilding. Then attach a one-round-trip refresh.
         if result.status == .completed {
             context.markSessionDirty(sessionId: target.sessionId)
+            return try await attachPostActionState(
+                context: context,
+                result: result,
+                app: target.app,
+                options: options
+            )
         }
-        return .text(try CanonicalJSON.encodeToString(result))
+        return try encodeActionResult(result)
     }
+
 
     // MARK: - Phase 4 fallback handlers (§16)
 
     /// `click`: coordinate fallback (§16) when `at` is present, else the Phase 2 semantic
-    /// path (§13). The engine never auto-escalates — the caller opts into the coordinate
-    /// path by passing `at`.
+    /// path (§13) for ordinary left clicks. Right/middle element clicks are delivered
+    /// through the element's verified current frame under the existing interference /
+    /// focus / target gates — never a bare invented coordinate. `clickCount` is 1...3
+    /// (default 1); left multi-clicks repeat AXPress, coordinate multi-clicks set
+    /// CoreGraphics click-state 1...N.
     static func clickHandler(context: ServiceContext) -> ToolHandler {
         { arguments in
+            let button = decodeButton(arguments)
+            let clickCount = decodeClickCount(arguments)
             if arguments["at"] != nil {
                 let target = try decodeFallbackTarget(arguments)
                 let action = FallbackAction.coordinateClick(
                     at: try decodePoint(arguments["at"], field: "at"),
                     space: try decodeSpace(arguments),
-                    button: decodeButton(arguments),
-                    modifiers: modifierFlags(from: arguments["modifiers"])
+                    button: button,
+                    modifiers: modifierFlags(from: arguments["modifiers"]),
+                    clickCount: clickCount
                 )
-                return try runFallback(context: context, action: action, target: target)
+                return try await runFallback(context: context, arguments: arguments, action: action, target: target)
             }
-            return try runSemantic(context: context, arguments: arguments) { _ in .click }
+
+            // Element form. Ordinary left → AXPress (with multi-click). Right/middle need
+            // pointer semantics via the element's verified frame centre.
+            if SemanticActions.usesAXPress(button: button) {
+                return try await runSemantic(context: context, arguments: arguments) { _ in
+                    clickCount <= 1 ? .click : .clickRepeated(count: clickCount)
+                }
+            }
+            return try await runElementPointerClick(
+                context: context,
+                arguments: arguments,
+                button: button,
+                clickCount: clickCount
+            )
         }
     }
 
     /// `scroll`: coordinate fallback (§16) when `at` is present, else the Phase 2 semantic
-    /// scroll (§13). `direction` is required in both forms.
+    /// scroll (§13). `direction` is required in both forms. `count` is a positive number
+    /// (integers remain valid); fractional page amounts pass through.
     static func scrollHandler(context: ServiceContext) -> ToolHandler {
         { arguments in
             guard let raw = arguments["direction"]?.stringValue, let direction = ScrollDirection(rawValue: raw) else {
                 throw ToolInvalidArguments("scroll requires \"direction\" ∈ up|down|left|right")
             }
             let by = arguments["by"]?.stringValue.flatMap(ScrollGranularity.init(rawValue:)) ?? .line
-            let count = arguments["count"]?.intValue ?? 1
+            let count = try decodeScrollCount(arguments)
             if arguments["at"] != nil {
                 let target = try decodeFallbackTarget(arguments)
                 let action = FallbackAction.coordinateScroll(
@@ -248,11 +301,11 @@ public enum ToolHandlers {
                     space: try decodeSpace(arguments),
                     direction: direction,
                     by: by,
-                    count: max(1, count)
+                    count: count
                 )
-                return try runFallback(context: context, action: action, target: target)
+                return try await runFallback(context: context, arguments: arguments, action: action, target: target)
             }
-            return try runSemantic(context: context, arguments: arguments) { _ in
+            return try await runSemantic(context: context, arguments: arguments) { _ in
                 .scroll(direction: direction, by: by, count: count)
             }
         }
@@ -271,7 +324,12 @@ public enum ToolHandlers {
             } catch let error as KeyChordError {
                 throw ToolInvalidArguments("invalid combo: \(error.message)")
             }
-            return try runFallback(context: context, action: .pressKey(chords: chords), target: target)
+            return try await runFallback(
+                context: context,
+                arguments: arguments,
+                action: .pressKey(chords: chords),
+                target: target
+            )
         }
     }
 
@@ -282,7 +340,12 @@ public enum ToolHandlers {
             guard let text = arguments["text"]?.stringValue else {
                 throw ToolInvalidArguments("type_text requires a string \"text\"")
             }
-            return try runFallback(context: context, action: .typeText(text), target: target)
+            return try await runFallback(
+                context: context,
+                arguments: arguments,
+                action: .typeText(text),
+                target: target
+            )
         }
     }
 
@@ -296,9 +359,91 @@ public enum ToolHandlers {
                 button: decodeButton(arguments),
                 modifiers: modifierFlags(from: arguments["modifiers"])
             )
-            return try runFallback(context: context, action: action, target: target)
+            return try await runFallback(context: context, arguments: arguments, action: action, target: target)
         }
     }
+
+    /// Element right/middle (or other pointer-semantic) click: resolve the live element
+    /// frame after revision checks, then deliver a coordinate click at its centre through
+    /// the existing fallback interference / focus / target-verification gates. Never invents
+    /// a bare coordinate — if the frame cannot be read or sits outside the target window,
+    /// delivery is refused.
+    static func runElementPointerClick(
+        context: ServiceContext,
+        arguments: JSONValue,
+        button: PointerButton,
+        clickCount: Int
+    ) async throws -> ToolResult {
+        let elementTarget = try decode(ElementTarget.self, from: arguments)
+        let interference = arguments["interference"]?.stringValue
+            .flatMap(InterferencePolicy.init(rawValue:)) ?? .backgroundOnly
+        let modifiers = modifierFlags(from: arguments["modifiers"])
+
+        // Resolve the live element under the same revision contract as Phase 2.
+        let env = context.actionEnvironment()
+        guard let current = env.currentRevision(sessionId: elementTarget.sessionId) else {
+            throw CUError.staleRevision(sessionId: elementTarget.sessionId, provided: elementTarget.revision, current: nil)
+        }
+        guard try env.sessionOwnedByApp(sessionId: elementTarget.sessionId, app: elementTarget.app) else {
+            throw CUError.policyDenied(reason: .appDenied, app: elementTarget.app, tool: "click")
+        }
+        guard current == elementTarget.revision else {
+            throw CUError.staleRevision(sessionId: elementTarget.sessionId, provided: elementTarget.revision, current: current)
+        }
+        let element = try env.resolveElement(
+            sessionId: elementTarget.sessionId,
+            elementId: elementTarget.elementId,
+            revision: elementTarget.revision
+        )
+
+        // Read the verified current frame via the live AX handle (not a cached tree node).
+        guard let geometry = context.windowGeometry(forSession: elementTarget.sessionId) else {
+            throw CUError.windowNotFound(app: elementTarget.app, windowId: nil)
+        }
+        guard let axElement = element as? AXActionElement else {
+            throw CUError.unsupportedAction(
+                elementId: elementTarget.elementId,
+                action: button.rawValue + "-click",
+                supported: element.actionNames(),
+                reason: "Element pointer click requires a live AX-backed frame; the resolved element is not AX-backed."
+            )
+        }
+        // Access the frame through the same AXClient the handle was built with.
+        // AXActionElement does not expose the raw element publicly, so re-resolve the
+        // handle from the session table (already revision-checked above).
+        let handle = try context.elementTable(forSession: elementTarget.sessionId)
+            .resolve(elementTarget.elementId, sessionId: elementTarget.sessionId, revision: elementTarget.revision)
+        guard let axHandle = handle as? AXElementHandle,
+              let frameGlobal = context.axClient.frame(of: axHandle.element),
+              frameGlobal.width >= 0, frameGlobal.height >= 0 else {
+            throw CUError.unsupportedAction(
+                elementId: elementTarget.elementId,
+                action: button.rawValue + "-click",
+                supported: element.actionNames(),
+                reason: "Element pointer click requires a readable current frame; none was available."
+            )
+        }
+        let centerWindow = Point(
+            x: Double(frameGlobal.midX) - geometry.framePoints.x,
+            y: Double(frameGlobal.midY) - geometry.framePoints.y
+        )
+        let fallbackTarget = FallbackTarget(
+            app: elementTarget.app,
+            sessionId: elementTarget.sessionId,
+            interference: interference
+        )
+        let action = FallbackAction.coordinateClick(
+            at: centerWindow,
+            space: .window,
+            button: button,
+            modifiers: modifiers,
+            clickCount: clickCount
+        )
+        // Silence unused binding (element already validated live above).
+        _ = axElement
+        return try await runFallback(context: context, arguments: arguments, action: action, target: fallbackTarget)
+    }
+
 
     // MARK: - v1.5 read-only verification (§18.7)
 
@@ -316,11 +461,15 @@ public enum ToolHandlers {
     }
 
     /// Run one Phase 4 fallback action to completion through the executor's fallback path.
+    /// Completed and interrupted deliveries mark the session dirty and attach a post-action
+    /// refresh; rejected actions never refresh.
     static func runFallback(
         context: ServiceContext,
+        arguments: JSONValue,
         action: FallbackAction,
         target: FallbackTarget
-    ) throws -> ToolResult {
+    ) async throws -> ToolResult {
+        let options = try decode(SnapshotOptions.self, from: arguments)
         // Reflect the fallback action's target point in the overlay
         // (best-effort; the drawn cursor is decorative and does not move the system pointer).
         if let geometry = context.windowGeometry(forSession: target.sessionId) {
@@ -343,6 +492,7 @@ public enum ToolHandlers {
         } catch {
             // A rejected fallback (policy_denied / focus_required / …) returns the overlay to
             // idle rather than leaving it stuck (best-effort; never affects the thrown error).
+            // Rejected paths never refresh or attach state.
             context.cursorController.finish(sessionId: target.sessionId, interrupted: false)
             throw error
         }
@@ -354,9 +504,86 @@ public enum ToolHandlers {
         // SECURITY.md §6. Only a `rejected` action (nothing delivered) leaves state untouched.
         if result.status == .completed || result.status == .interrupted {
             context.markSessionDirty(sessionId: target.sessionId)
+            return try await attachPostActionState(
+                context: context,
+                result: result,
+                app: target.app,
+                options: options
+            )
         }
-        return .text(try CanonicalJSON.encodeToString(result))
+        return try encodeActionResult(result)
     }
+
+    // MARK: - Post-action state attachment
+
+    /// Deterministic warning when a committed mutation's post-action refresh fails for a
+    /// non-cancellation reason. The mutation itself still stands; `refreshRecommended` stays true.
+    static let postActionRefreshFailedWarning =
+        "Post-action state refresh failed; call get_app_state to observe the result."
+
+    /// After a committed mutation, cascade the caller's `SnapshotOptions` into
+    /// `AppStateBuilder`, attach `result.state`, clear `refreshRecommended` on success, and
+    /// emit a separate image content block when a screenshot was produced.
+    ///
+    /// Cancellation during refresh propagates. A non-cancellation refresh failure returns the
+    /// committed `ActionResult` with `state` omitted, `refreshRecommended` preserved, and an
+    /// additive warning — never converting a successful mutation into an error.
+    static func attachPostActionState(
+        context: ServiceContext,
+        result: ActionResult,
+        app: String,
+        options: SnapshotOptions
+    ) async throws -> ToolResult {
+        let request = options.asGetAppStateRequest(app: app)
+        do {
+            let output = try await AppStateBuilder(context: context, resolver: context.appResolver).build(request)
+            // Record the refreshed window geometry so the overlay follows moves.
+            // Best-effort and decorative — never affects the result.
+            context.cursorController.noteWindowFrame(
+                sessionId: output.state.sessionId,
+                output.state.window.framePoints
+            )
+            var attached = result
+            attached.state = output.state
+            attached.refreshRecommended = false
+            return try encodeActionResult(attached, imageBase64: output.imageBase64)
+        } catch {
+            if isCancellation(error) { throw error }
+            var degraded = result
+            degraded.state = nil
+            // Preserve refreshRecommended from the committed result (true for mutations).
+            degraded.warning = appendWarning(result.warning, Self.postActionRefreshFailedWarning)
+            return try encodeActionResult(degraded)
+        }
+    }
+
+    /// Encode an `ActionResult` as the primary text block, optionally followed by a separate
+    /// image content block (screenshot bytes never embed inside the JSON).
+    static func encodeActionResult(_ result: ActionResult, imageBase64: String? = nil) throws -> ToolResult {
+        let text = try CanonicalJSON.encodeToString(result)
+        var blocks: [ToolContent] = [.text(text)]
+        if let imageBase64 {
+            blocks.append(.image(base64: imageBase64, mimeType: CaptureEngine.mcpMimeType))
+        }
+        return ToolResult(content: blocks)
+    }
+
+    /// Append an additive warning without overwriting any existing one.
+    static func appendWarning(_ existing: String?, _ addition: String) -> String {
+        if let existing, !existing.isEmpty {
+            return existing + " " + addition
+        }
+        return addition
+    }
+
+    /// Whether an error represents client/process cancellation (must propagate, not degrade).
+    static func isCancellation(_ error: Error) -> Bool {
+        if case CUError.cancelled = error { return true }
+        if error is CancellationError { return true }
+        if let token = CancellationToken.current, token.isCancelled { return true }
+        return false
+    }
+
 
     // MARK: - Fallback argument decoding
 
@@ -419,6 +646,24 @@ public enum ToolHandlers {
         arguments["button"]?.stringValue.flatMap(PointerButton.init(rawValue:)) ?? .left
     }
 
+    /// Decode `clickCount` (default 1). Schema already clamps to integer 1...3; defensive
+    /// clamp keeps a pre-validated call site honest if the schema is bypassed in tests.
+    static func decodeClickCount(_ arguments: JSONValue) -> Int {
+        let raw = arguments["clickCount"]?.intValue ?? 1
+        return max(1, min(3, raw))
+    }
+
+    /// Decode `scroll.count` as a positive Double (default 1). Integers remain valid via
+    /// `doubleValue`; rejects non-positive values (schema allows 0 as inclusive minimum
+    /// because the validator has no exclusive bound).
+    static func decodeScrollCount(_ arguments: JSONValue) throws -> Double {
+        let raw = arguments["count"]?.doubleValue ?? 1
+        guard raw > 0 else {
+            throw ToolInvalidArguments("\"count\" must be a number > 0")
+        }
+        return raw
+    }
+
     /// Decode a `modifiers` array into CGEvent flags (unknown tokens are ignored; the
     /// schema enum already constrains the set).
     static func modifierFlags(from value: JSONValue?) -> CGEventFlags {
@@ -467,7 +712,7 @@ enum CursorReflection {
     /// coordinate, so the drawn cursor rests at the window centre (`at: nil` in the plan).
     static func kind(for action: SemanticAction) -> CursorActionKind {
         switch action {
-        case .click, .performAction, .setValue: return .press
+        case .click, .clickRepeated, .performAction, .setValue: return .press
         case .selectText: return .move
         case .scroll: return .move
         }
@@ -491,7 +736,7 @@ enum CursorReflection {
     /// has already shown the overlay, but never bring it on screen themselves.
     static func armsFirstShow(for action: SemanticAction) -> Bool {
         switch action {
-        case .click, .scroll: return true
+        case .click, .clickRepeated, .scroll: return true
         case .performAction, .setValue, .selectText: return false
         }
     }
@@ -503,7 +748,7 @@ enum CursorReflection {
         switch action {
         case .pressKey, .typeText:
             return (.progress, nil, false)
-        case let .coordinateClick(at, space, _, _):
+        case let .coordinateClick(at, space, _, _, _):
             return (.press, windowPoint(at, space: space, geometry: geometry), true)
         case let .drag(_, to, space, _, _):
             // Track the drag's END point (where the cursor lands).

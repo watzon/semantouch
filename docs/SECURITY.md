@@ -5,13 +5,30 @@ stance, and clean-room constraints. `PROTOCOL.md` wins on wire-level detail
 (error codes, `doctor` schema); this document does not restate schemas except
 where needed for context.
 
+Public computer-use support is **macOS only**. Windows/Linux GA is not claimed.
+
 ## 1. OS permission model
 
-The signed helper requires two macOS TCC grants:
+The signed **`Semantouch.app` host** requires two macOS TCC grants:
 
 - **Accessibility** — required for all AX tree reads and actions.
-- **Screen Recording** — required for any window capture (`get_app_state`
-  screenshots).
+- **Screen Recording** — required for any window capture (`get_app_state` /
+  `screenshot`).
+
+### 1.1 Who holds TCC
+
+| Process | Path | Holds TCC? | Role |
+|---|---|---|---|
+| App host | `Semantouch.app/Contents/MacOS/SemantouchHost` (bundle id `tech.watzon.semantouch`) | **Yes** | Engines, AX, capture, actions, doctor probes |
+| Nested relay | `Semantouch.app/Contents/MacOS/semantouch` | **No** | Stdio/control client + opaque MCP byte relay |
+
+Sources: `Sources/SemantouchCLIKit/Packaging.swift` (`tccOwnershipDescription`,
+`requiredPermissions`), `Sources/SemantouchApp/main.swift`,
+`Sources/SemantouchCLI/main.swift`, `packaging/semantouch.plugin.json`.
+
+Grant Accessibility and Screen Recording to the **host**, not the nested relay.
+`doctor` names the exact running host path in `helper.path` and remediation
+(`Sources/ComputerUseService/DoctorService.swift`).
 
 Rules:
 
@@ -49,7 +66,7 @@ Rules:
 - Matching is by **app identity tokens**: bundle id preferred, plus display name, full
   path, and the path's last component when available (PROTOCOL.md §10.1). Tokens are
   compared exactly and case-insensitively.
-- The denylist is process-local (from the helper's environment). It is independent of OS
+- The denylist is process-local (from the host's environment). It is independent of OS
   TCC grants and of OMP's shell sandbox: a granted Accessibility permission does not imply
   an app may be automated, and an empty denylist does not waive action-time confirmation
   (§3).
@@ -63,9 +80,9 @@ Environment variable **`SEMANTOUCH_DENIED_APPS`**:
 - Exact, case-insensitive match against any of: bundle identifier, display name, full
   path, path basename.
 - Applies to **both reads and mutations** (`get_app_state`, CLI probes, semantic actions,
-  and fallback input). A match returns `policy_denied` with
-  `data.reason: "app_denied"` (and `data.app` / `data.tool` when applicable) **before** any
-  AX or CG call.
+  fallback input, and lifecycle tools such as `launch_app`). A match returns `policy_denied`
+  with `data.reason: "app_denied"` (and `data.app` / `data.tool` when applicable) **before**
+  any AX or CG call.
 
 Practical example — block Terminal and Keychain Access:
 
@@ -74,7 +91,7 @@ Practical example — block Terminal and Keychain Access:
   "mcpServers": {
     "semantouch": {
       "type": "stdio",
-      "command": "/abs/path/to/semantouch",
+      "command": "/Applications/Semantouch.app/Contents/MacOS/semantouch",
       "args": ["mcp"],
       "env": {
         "SEMANTOUCH_DENIED_APPS": "com.apple.Terminal,Terminal,com.apple.keychainaccess,Keychain Access"
@@ -93,9 +110,9 @@ implies that a consequential UI action may proceed without human confirmation.
 
 ## 3. Action-time confirmation
 
-Mutating tools (`click`, `perform_action`, `set_value`, `select_text`, `scroll`,
-`press_key`, `type_text`, and `drag`, including coordinate fallback) additionally
-require **explicit human confirmation at dispatch time** for any
+Mutating tools (`launch_app`, `click`, `perform_action`, `set_value`, `select_text`,
+`scroll`, `press_key`, `type_text`, and `drag`, including coordinate fallback)
+additionally require **explicit human confirmation at dispatch time** for any
 action whose semantic effect falls into:
 
 - destructive/irreversible operations (deletion, overwrite, empty-trash);
@@ -169,7 +186,25 @@ Binding on all implementation work in this repository:
   future change separately reviews it for legality, stability, and
   distribution risk; the default is public API only.
 
-## 6. Interruption as a security boundary
+## 6. Host ↔ relay trust boundary
+
+The nested relay is not a second TCC principal. Security properties of the private
+host socket (`Sources/SemantouchIPC/*`):
+
+- Framed hello with protocol version, role (`mcp` | `control`), client version, and
+  nonce (`HostProtocol`).
+- Peer trust policy checks same euid / code identity expectations
+  (`PeerTrust.swift`); production trust has no environment bypass
+  (`Tests/SemantouchIPCTests/HostClientAndRelayTests.swift`
+  `testProductionVerifierHasNoEnvBypass`).
+- After a successful MCP hello, the connection is opaque raw MCP bytes —
+  no re-encoding, retry, or replay after established EOF
+  (`OpaqueRelay.swift`, `Sources/SemantouchCLI/main.swift`).
+- Each MCP connection gets a fresh `ServiceContext` (no shared revisions/ids across
+  peers or restarts) (`Sources/SemantouchApp/HostController.swift`,
+  `Sources/ComputerUseService/MCPRuntime.swift`).
+
+## 7. Interruption as a security boundary
 
 A physically-present user always wins. `UserInterruptionMonitor` detecting
 genuine user input during a fallback (keyboard/pointer) action MUST cancel the
@@ -195,7 +230,7 @@ monitor discriminates on it alone and MUST NOT time-suppress genuine keyboard,
 button, or scroll input — a dense synthetic delivery must never mask the
 cancellation it most needs.
 
-## 7. Focus changes and foregrounding (fallback input)
+## 8. Focus changes and foregrounding (fallback input)
 
 Fallback input never delivers to a target that is not confirmed frontmost. The
 interference policy (PROTOCOL.md §16.2, §16.7) is the safety boundary:
@@ -207,18 +242,18 @@ interference policy (PROTOCOL.md §16.2, §16.7) is the safety boundary:
   non-default opt-in to a focus change. The agent MUST NOT silently escalate to
   them.
 
-**Foregrounding is OS-restricted, and the helper stays within its two granted
-permissions.** Empirically (macOS 14+, verified on macOS 26), a background helper
-process often cannot foreground a background app: `NSRunningApplication.activate()`
-returns `true` but the target never becomes frontmost. To make the sanctioned
-focus-changing modes as effective as the public surface allows, the server, after
-a failed `activate()`, additionally tries a PUBLIC **Accessibility** foreground
-fallback — setting the target app element's `kAXFrontmost` and raising its main
-window — using the **already-granted Accessibility permission**. It deliberately
-does **not** shell out to `osascript` / System Events: that would require a
-**third TCC grant** (Apple Events / Automation) and a process-per-action
-shell-out, both outside this helper's clean-room, two-permission model
-(Accessibility + Screen Recording; SECURITY.md §1).
+**Foregrounding is OS-restricted, and the host stays within its two granted
+permissions.** Empirically (macOS 14+, verified on macOS 26 in TEST-MATRIX §4), a
+background process often cannot foreground a background app:
+`NSRunningApplication.activate()` returns `true` but the target never becomes
+frontmost. To make the sanctioned focus-changing modes as effective as the public
+surface allows, the server, after a failed `activate()`, additionally tries a PUBLIC
+**Accessibility** foreground fallback — setting the target app element's
+`kAXFrontmost` and raising its main window — using the **already-granted Accessibility
+permission**. It deliberately does **not** shell out to `osascript` / System Events:
+that would require a **third TCC grant** (Apple Events / Automation) and a
+process-per-action shell-out, both outside this helper's clean-room, two-permission
+model (Accessibility + Screen Recording; SECURITY.md §1).
 
 The fail-safe direction is invariant regardless of platform outcome: input is
 delivered **only** after frontmost is re-confirmed; if neither `activate()` nor the
@@ -227,3 +262,15 @@ AX fallback foregrounds the target, the action returns `focus_required` /
 type or click into the user's app by mistake. Whether the AX fallback actually
 foregrounds a background app on a given OS is a platform-dependent property proven
 by live acceptance, not assumed here.
+
+## 9. Release integrity
+
+- New tags are signed with Developer ID Application + Hardened Runtime, notarized, and
+  stapled as a whole app (ZIP + DMG) per [RELEASE.md](RELEASE.md) and
+  `.github/workflows/release.yml`.
+- Published GitHub release assets are immutable (workflow refuses delete/recreate).
+- Checksums are SHA-256 sidecars; the launcher and update path verify before install
+  (`scripts/semantouch`, `Sources/ComputerUseService/UpdateService.swift`).
+- npm and Homebrew publish workflows exist but are **not** public install guarantees
+  until a release that produces the universal2 ZIP succeeds and those jobs complete
+  (see [INSTALL.md](INSTALL.md), [RELEASE.md](RELEASE.md)).

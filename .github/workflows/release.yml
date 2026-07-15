@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -14,41 +16,136 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish macOS arm64 release
+    name: Build and publish macOS universal2 app release
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 90
+    environment: release-signing
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Show toolchain
         run: |
           test "$(uname -m)" = "arm64"
           swift --version
+          xcrun --find lipo
+          xcrun --find hdiutil
 
       - name: Test
         run: swift test
 
-      - name: Build release binary
-        run: swift build -c release --product semantouch
+      - name: Build host and relay for arm64 and x86_64
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cross-compile both products for arm64 and x86_64 on the arm64 runner,
+          # then lipo into universal2 binaries. Deployment floor is macOS 14.0.
+          mkdir -p dist/slices
+
+          build_slice() {
+            local arch=$1
+            local triple="${arch}-apple-macosx14.0"
+            echo "Building SemantouchHost + semantouch for $triple"
+            swift build -c release --product SemantouchHost --triple "$triple"
+            swift build -c release --product semantouch --triple "$triple"
+            local bin_path
+            bin_path="$(swift build -c release --show-bin-path --triple "$triple")"
+            test -x "$bin_path/SemantouchHost"
+            test -x "$bin_path/semantouch"
+            # Capture slice paths for lipo.
+            install -m 0755 "$bin_path/SemantouchHost" "dist/slices/SemantouchHost.$arch"
+            install -m 0755 "$bin_path/semantouch" "dist/slices/semantouch.$arch"
+            /usr/bin/lipo -archs "dist/slices/SemantouchHost.$arch" | /usr/bin/grep -qx "$arch"
+            /usr/bin/lipo -archs "dist/slices/semantouch.$arch" | /usr/bin/grep -qx "$arch"
+          }
+
+          build_slice arm64
+          build_slice x86_64
+
+          scripts/make-universal2 \
+            dist/slices/SemantouchHost.arm64 \
+            dist/slices/SemantouchHost.x86_64 \
+            dist/SemantouchHost
+          scripts/make-universal2 \
+            dist/slices/semantouch.arm64 \
+            dist/slices/semantouch.x86_64 \
+            dist/semantouch
+
+          # Refuse single-slice accidental promotions.
+          for path in dist/SemantouchHost dist/semantouch; do
+            archs="$(/usr/bin/lipo -archs "$path")"
+            echo "$path archs: $archs"
+            echo "$archs" | /usr/bin/grep -q 'arm64' || { echo "missing arm64 in $path" >&2; exit 1; }
+            echo "$archs" | /usr/bin/grep -q 'x86_64' || { echo "missing x86_64 in $path" >&2; exit 1; }
+            slice_count="$(printf '%s\n' $archs | /usr/bin/wc -w | /usr/bin/tr -d ' ')"
+            if [[ "$slice_count" != "2" ]]; then
+              echo "expected exactly 2 slices in $path, got: $archs" >&2
+              exit 1
+            fi
+          done
+
+          echo "host=$PWD/dist/SemantouchHost" >> "$GITHUB_OUTPUT"
+          echo "relay=$PWD/dist/semantouch" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag and release metadata
         id: version
         shell: bash
         run: |
           set -euo pipefail
-          binary="$(swift build -c release --show-bin-path)/semantouch"
-          scripts/verify-release-metadata "$binary"
+          host="${{ steps.build.outputs.host }}"
+          relay="${{ steps.build.outputs.relay }}"
+          test -x "$host"
+          test -x "$relay"
+          scripts/verify-release-metadata "$relay"
           version="$(/usr/bin/plutil -extract version raw package.json)"
+
+          # Strict semver tag only.
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag must be strict semver with v prefix (got: $GITHUB_REF_NAME)" >&2
+            exit 1
+          fi
           if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
             exit 1
           fi
+
+          # Tag commit must belong to approved main history.
+          tag_sha="$(git rev-list -n 1 "refs/tags/$GITHUB_REF_NAME" 2>/dev/null || git rev-list -n 1 "$GITHUB_REF_NAME")"
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$tag_sha" != "$head_sha" ]]; then
+            echo "tag $GITHUB_REF_NAME ($tag_sha) does not match checked-out commit $head_sha" >&2
+            exit 1
+          fi
+          git fetch origin main --depth=1 2>/dev/null || git fetch origin main
+          if ! git merge-base --is-ancestor "$tag_sha" origin/main 2>/dev/null \
+            && ! git branch -r --contains "$tag_sha" | /usr/bin/grep -E 'origin/main$' >/dev/null; then
+            main_sha="$(git rev-parse origin/main 2>/dev/null || true)"
+            if [[ "$tag_sha" != "$main_sha" ]]; then
+              echo "tag $GITHUB_REF_NAME ($tag_sha) is not on approved main history" >&2
+              exit 1
+            fi
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "relay=$relay" >> "$GITHUB_OUTPUT"
+          echo "app=dist/Semantouch.app" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble Semantouch.app
+        shell: bash
+        env:
+          HOST: ${{ steps.version.outputs.host }}
+          RELAY: ${{ steps.version.outputs.relay }}
+          APP: ${{ steps.version.outputs.app }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          scripts/assemble-app "$HOST" "$RELAY" "$APP"
 
       - name: Import Developer ID certificate
         id: signing
@@ -96,22 +193,23 @@ jobs:
 
           echo "identity=$identities" >> "$GITHUB_OUTPUT"
 
-      - name: Sign release executable
+      - name: Sign Semantouch.app inside-out
         shell: bash
         env:
-          BINARY: ${{ steps.version.outputs.binary }}
+          APP: ${{ steps.version.outputs.app }}
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          asset="dist/semantouch-macos-arm64"
-          /usr/bin/install -m 0755 "$BINARY" "$asset"
-          scripts/sign-release "$asset" "$SIGNING_IDENTITY"
-          "$asset" --version
+          scripts/sign-release "$APP" "$SIGNING_IDENTITY"
+          scripts/verify-app-release "$APP" "${{ steps.version.outputs.version }}"
 
-      - name: Notarize release executable
+      - name: Notarize, staple, and package app assets
+        id: package
         shell: bash
         env:
+          APP: ${{ steps.version.outputs.app }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
           NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_SPECIFIC_PASSWORD }}
           NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
@@ -120,25 +218,87 @@ jobs:
           : "${NOTARY_APPLE_ID:?APPLE_NOTARY_APPLE_ID is required}"
           : "${NOTARY_APP_SPECIFIC_PASSWORD:?APPLE_NOTARY_APP_SPECIFIC_PASSWORD is required}"
           : "${NOTARY_TEAM_ID:?APPLE_NOTARY_TEAM_ID is required}"
-
-          notarization_archive="$RUNNER_TEMP/semantouch-notarization.zip"
-          notarization_result="$RUNNER_TEMP/notarization.json"
-          /usr/bin/ditto -c -k --keepParent \
-            dist/semantouch-macos-arm64 \
-            "$notarization_archive"
-
-          /usr/bin/xcrun notarytool submit "$notarization_archive" \
-            --apple-id "$NOTARY_APPLE_ID" \
-            --password "$NOTARY_APP_SPECIFIC_PASSWORD" \
-            --team-id "$NOTARY_TEAM_ID" \
-            --wait \
-            --output-format json > "$notarization_result"
-
-          status="$(/usr/bin/plutil -extract status raw "$notarization_result")"
-          if [[ "$status" != "Accepted" ]]; then
-            /bin/cat "$notarization_result" >&2
+          if [[ "$NOTARY_TEAM_ID" != "MB5789APU7" ]]; then
+            echo "APPLE_NOTARY_TEAM_ID must be MB5789APU7" >&2
             exit 1
           fi
+
+          export APPLE_NOTARY_APPLE_ID="$NOTARY_APPLE_ID"
+          export APPLE_NOTARY_APP_SPECIFIC_PASSWORD="$NOTARY_APP_SPECIFIC_PASSWORD"
+          export APPLE_NOTARY_TEAM_ID="$NOTARY_TEAM_ID"
+
+          # Notarize + staple the app first (ticket lives in the app for ZIP consumers).
+          scripts/notarize-release "$APP"
+
+          # Full Gatekeeper / staple / identity / universal2 contract after staple.
+          SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release "$APP" "$VERSION"
+
+          # Canonical immutable ZIP + signed DMG (+ sha256 sidecars).
+          scripts/package-app-release "$APP" dist "$VERSION" "$SIGNING_IDENTITY"
+
+          app_zip="dist/Semantouch-v${VERSION}-macos-universal2.zip"
+          app_dmg="dist/Semantouch-v${VERSION}-macos-universal2.dmg"
+          test -f "$app_zip"
+          test -f "${app_zip}.sha256"
+          test -f "$app_dmg"
+          test -f "${app_dmg}.sha256"
+
+          # Verify the final ZIP bytes, not only the source app. Preflight before
+          # extraction, then prove the stapled/signature contract survived archiving.
+          zip_check="$RUNNER_TEMP/semantouch-release-zip-check"
+          /bin/rm -rf "$zip_check"
+          mkdir -p "$zip_check"
+          node -e '
+            const fs = require("node:fs");
+            const { preflightZipBuffer } = require("./npm/semantouch/lib/extract");
+            preflightZipBuffer(fs.readFileSync(process.argv[1]));
+          ' "$app_zip"
+          /usr/bin/ditto -x -k "$app_zip" "$zip_check"
+          SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release \
+            "$zip_check/Semantouch.app" "$VERSION"
+          /bin/rm -rf "$zip_check"
+
+          # Notarize + staple the signed DMG (staple-able container).
+          scripts/notarize-release "$app_dmg"
+          /usr/bin/xcrun stapler validate "$app_dmg"
+
+          # Refresh DMG checksum after stapling mutates the file.
+          (
+            cd dist
+            /usr/bin/shasum -a 256 "$(basename "$app_dmg")" > "$(basename "$app_dmg").sha256"
+          )
+
+          # Plugin archive is script/config-only — no raw TCC-capable binary.
+          plugin_stage="$RUNNER_TEMP/semantouch"
+          /bin/rm -rf "$plugin_stage"
+          mkdir -p "$plugin_stage/scripts"
+          cp -R .claude-plugin commands skills "$plugin_stage/"
+          cp scripts/semantouch "$plugin_stage/scripts/"
+          cp .mcp.json package.json LICENSE README.md "$plugin_stage/"
+          if [[ -e "$plugin_stage/bin" ]]; then
+            echo "plugin archive must not contain a bin/ directory with a TCC binary" >&2
+            exit 1
+          fi
+          if find "$plugin_stage" -type f -perm -111 -print0 \
+            | xargs -0 /usr/bin/file \
+            | /usr/bin/grep -E 'Mach-O' >/dev/null; then
+            echo "plugin archive must not include Mach-O binaries" >&2
+            exit 1
+          fi
+
+          plugin_archive="dist/semantouch-plugin-v${VERSION}-macos-universal2.tar.gz"
+          /usr/bin/tar -czf "$plugin_archive" -C "$RUNNER_TEMP" semantouch
+          (cd dist && /usr/bin/shasum -a 256 "$(basename "$plugin_archive")" > "$(basename "$plugin_archive").sha256")
+
+          # Refuse to publish a raw helper for new releases.
+          if [[ -e dist/semantouch-macos-arm64 || -e dist/semantouch-macos-universal2 ]]; then
+            echo "raw helper binary must not be emitted for new releases" >&2
+            exit 1
+          fi
+
+          echo "app_zip=$app_zip" >> "$GITHUB_OUTPUT"
+          echo "app_dmg=$app_dmg" >> "$GITHUB_OUTPUT"
+          echo "plugin_archive=$plugin_archive" >> "$GITHUB_OUTPUT"
 
       - name: Clean up signing material
         if: always()
@@ -148,7 +308,7 @@ jobs:
         run: |
           cleanup_failed=0
 
-          if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
             if ! /usr/bin/security delete-keychain "$SIGNING_KEYCHAIN"; then
               /bin/rm -f "$SIGNING_KEYCHAIN"
             fi
@@ -160,8 +320,15 @@ jobs:
 
           /bin/rm -f \
             "$RUNNER_TEMP/developer-id-application.p12" \
-            "$RUNNER_TEMP/semantouch-notarization.zip" \
-            "$RUNNER_TEMP/notarization.json"
+            "$RUNNER_TEMP/semantouch-app-notarization.zip" \
+            "$RUNNER_TEMP/app-notarization.json" \
+            "$RUNNER_TEMP/semantouch-dmg-notarization.zip" \
+            "$RUNNER_TEMP/dmg-notarization.json"
+          /bin/rm -rf \
+            "$RUNNER_TEMP/semantouch-dmg" \
+            "$RUNNER_TEMP/semantouch" \
+            "$RUNNER_TEMP/semantouch-release-zip-check" \
+            dist/slices
 
           if [[ -e "$RUNNER_TEMP/developer-id-application.p12" ]]; then
             echo "failed to remove decoded Developer ID certificate" >&2
@@ -169,25 +336,17 @@ jobs:
           fi
 
           exit "$cleanup_failed"
-      - name: Package release assets
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          asset="dist/semantouch-macos-arm64"
-          (cd dist && /usr/bin/shasum -a 256 semantouch-macos-arm64 > semantouch-macos-arm64.sha256)
 
-          plugin_stage="$RUNNER_TEMP/semantouch"
-          mkdir -p "$plugin_stage/bin" "$plugin_stage/scripts"
-          cp -R .claude-plugin commands skills "$plugin_stage/"
-          cp scripts/semantouch "$plugin_stage/scripts/"
-          cp .mcp.json package.json LICENSE README.md "$plugin_stage/"
-          /usr/bin/install -m 0755 "$asset" "$plugin_stage/bin/semantouch"
-
-          archive="dist/semantouch-plugin-v$VERSION-macos-arm64.tar.gz"
-          /usr/bin/tar -czf "$archive" -C "$RUNNER_TEMP" semantouch
-          (cd dist && /usr/bin/shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+      - name: Attest release artifacts
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: |
+            dist/Semantouch-v${{ steps.version.outputs.version }}-macos-universal2.zip
+            dist/Semantouch-v${{ steps.version.outputs.version }}-macos-universal2.zip.sha256
+            dist/Semantouch-v${{ steps.version.outputs.version }}-macos-universal2.dmg
+            dist/Semantouch-v${{ steps.version.outputs.version }}-macos-universal2.dmg.sha256
+            dist/semantouch-plugin-v${{ steps.version.outputs.version }}-macos-universal2.tar.gz
+            dist/semantouch-plugin-v${{ steps.version.outputs.version }}-macos-universal2.tar.gz.sha256
 
       - name: Create GitHub release and upload assets
         shell: bash
@@ -197,19 +356,33 @@ jobs:
         run: |
           set -euo pipefail
           assets=(
-            dist/semantouch-macos-arm64
-            dist/semantouch-macos-arm64.sha256
-            "dist/semantouch-plugin-v$VERSION-macos-arm64.tar.gz"
-            "dist/semantouch-plugin-v$VERSION-macos-arm64.tar.gz.sha256"
+            "dist/Semantouch-v$VERSION-macos-universal2.zip"
+            "dist/Semantouch-v$VERSION-macos-universal2.zip.sha256"
+            "dist/Semantouch-v$VERSION-macos-universal2.dmg"
+            "dist/Semantouch-v$VERSION-macos-universal2.dmg.sha256"
+            "dist/semantouch-plugin-v$VERSION-macos-universal2.tar.gz"
+            "dist/semantouch-plugin-v$VERSION-macos-universal2.tar.gz.sha256"
           )
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "release $GITHUB_REF_NAME already exists; published assets are immutable" >&2
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "missing release asset: $asset" >&2
               exit 1
             fi
-            gh release delete "$GITHUB_REF_NAME" --yes
+          done
+
+          # Never publish a raw TCC helper for new releases.
+          if [[ -e dist/semantouch-macos-arm64 || -e dist/semantouch-macos-universal2 ]]; then
+            echo "raw helper binary must not be published" >&2
+            exit 1
+          fi
+
+          # Immutable release contract: never delete/recreate drafts or published
+          # releases. Any existing release for this tag fails closed.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
+            echo "release $GITHUB_REF_NAME already exists (draft=$is_draft); refusing delete/recreate to preserve immutability" >&2
+            exit 1
           fi
 
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
@@ -218,4 +391,3 @@ jobs:
             --generate-notes \
             --title "Semantouch $VERSION"
           gh release edit "$GITHUB_REF_NAME" --draft=false
-

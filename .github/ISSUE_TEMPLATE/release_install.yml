@@ -1,0 +1,63 @@
+name: Release / install
+description: Download, checksum, signing/notarization, OMP plugin install, app bootstrap, or update problems.
+title: "Release: "
+labels: ["bug", "release"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for installers, release assets, checksums, code signing, notarization, OMP plugin bootstrap, or `semantouch update`. Never paste notarization passwords, Developer ID material, or tokens.
+  - type: input
+    id: version
+    attributes:
+      label: Version / tag
+      placeholder: v0.2.1
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Install channel
+      options:
+        - omp plugin install github:watzon/semantouch#tag
+        - omp marketplace install
+        - scripts/semantouch app bootstrap
+        - semantouch update
+        - manual source build
+        - experimental npm/Homebrew path
+        - other
+    validations:
+      required: true
+  - type: input
+    id: asset
+    attributes:
+      label: Asset name
+      description: Exact release asset if relevant.
+      placeholder: Semantouch-v0.2.1-macos-universal2.zip
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, arch, OMP version if any, whether /Applications or ~/Applications already had Semantouch.app.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include checksum mismatch text, codesign/spctl output, or launcher stderr. Redact secrets and machine-specific home noise when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification evidence
+      description: sha256 commands, `semantouch doctor --json`, codesign/spctl snippets, HTTP status for downloads.
+    validations:
+      required: true

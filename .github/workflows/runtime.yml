@@ -1,0 +1,196 @@
+name: Runtime
+
+on:
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "Sources/MCPServer/ToolCatalog.swift"
+      - "scripts/verify-cross-platform-contract.mjs"
+      - ".github/workflows/runtime.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "runtime/**"
+      - "Sources/MCPServer/ToolCatalog.swift"
+      - "scripts/verify-cross-platform-contract.mjs"
+      - ".github/workflows/runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.88.0"
+
+jobs:
+  catalog-parity:
+    name: Catalog parity (Swift ↔ Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Verify cross-platform tool catalog contract
+        run: node scripts/verify-cross-platform-contract.mjs
+
+  shared-macos:
+    name: Shared Rust tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+          fi
+          # shellcheck disable=SC1091
+          if [[ -f "${HOME}/.cargo/env" ]]; then
+            source "${HOME}/.cargo/env"
+          fi
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          rustc --version | grep -F "${RUST_VERSION}"
+          cargo --version
+
+      - name: Test shared crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test \
+            -p semantouch-protocol \
+            -p semantouch-core \
+            -p semantouch-adapter \
+            -p semantouch-runtime
+
+      - name: Compile-check shared + runtime facade
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check \
+            -p semantouch-protocol \
+            -p semantouch-core \
+            -p semantouch-adapter \
+            -p semantouch-runtime
+
+  windows:
+    name: Windows native runtime
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+          fi
+          if [[ -f "${HOME}/.cargo/env" ]]; then
+            source "${HOME}/.cargo/env"
+          fi
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          rustc --version | grep -F "${RUST_VERSION}"
+          cargo --version
+
+      - name: Test Windows platform crate + runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p semantouch-windows -p semantouch-runtime
+
+      - name: Compile-check Windows targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p semantouch-windows -p semantouch-runtime
+          rustup target add x86_64-pc-windows-msvc
+          cargo check -p semantouch-windows -p semantouch-runtime --target x86_64-pc-windows-msvc
+
+  linux:
+    name: Linux native runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Linux build dependencies
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libdbus-1-dev \
+            libatspi2.0-dev \
+            libx11-dev \
+            libxtst-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+          fi
+          if [[ -f "${HOME}/.cargo/env" ]]; then
+            source "${HOME}/.cargo/env"
+          fi
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+          rustc --version | grep -F "${RUST_VERSION}"
+          cargo --version
+
+      - name: Test Linux platform crate + runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p semantouch-linux -p semantouch-runtime
+
+      - name: Compile-check Linux targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p semantouch-linux -p semantouch-runtime
+          rustup target add x86_64-unknown-linux-gnu
+          cargo check -p semantouch-linux -p semantouch-runtime --target x86_64-unknown-linux-gnu

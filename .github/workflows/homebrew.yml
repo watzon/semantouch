@@ -1,0 +1,302 @@
+name: Homebrew Cask
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Global serialization so concurrent tags cannot race the tap tip.
+concurrency:
+  group: homebrew-publish
+  cancel-in-progress: false
+
+jobs:
+  publish-cask:
+    name: Publish Homebrew cask for universal2 ZIP
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: homebrew-publish
+
+    steps:
+      - name: Check out source (cask template)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve release tag and strict version
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-}"
+          if [[ -z "$tag" ]]; then
+            tag="${DISPATCH_TAG:-}"
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "release tag is required" >&2
+            exit 1
+          fi
+
+          # Strict semver only: vMAJOR.MINOR.PATCH with optional pre-release/build.
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag must be strict semver with v prefix (got: $tag)" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          if [[ -z "$version" ]]; then
+            echo "empty version after stripping v from $tag" >&2
+            exit 1
+          fi
+
+          # Every trigger, including manual dispatch, must use the exact immutable
+          # tag commit and that commit must be on approved main history.
+          git fetch origin main --tags --force
+          tag_sha="$(git rev-parse "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+          if [[ -z "$tag_sha" ]]; then
+            echo "could not resolve tag $tag to a commit" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+            echo "tag $tag ($tag_sha) is not on approved main history" >&2
+            exit 1
+          fi
+          git checkout --detach "$tag_sha"
+          if [[ "$(git rev-parse HEAD)" != "$tag_sha" ]]; then
+            echo "failed to check out exact tag commit $tag_sha" >&2
+            exit 1
+          fi
+
+          package_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          if [[ "$version" != "$package_version" ]]; then
+            echo "tag version $version does not match tagged package.json $package_version" >&2
+            exit 1
+          fi
+
+          asset="Semantouch-v${version}-macos-universal2.zip"
+          checksum_asset="${asset}.sha256"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "checksum_asset=$checksum_asset" >> "$GITHUB_OUTPUT"
+
+      - name: Download release ZIP and verify checksum (fail closed)
+        id: asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ASSET: ${{ steps.meta.outputs.asset }}
+          CHECKSUM_ASSET: ${{ steps.meta.outputs.checksum_asset }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d "${TMPDIR:-/tmp}/semantouch-homebrew.XXXXXX")"
+          echo "work=$work" >> "$GITHUB_OUTPUT"
+          cd "$work"
+
+          if ! gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern "$ASSET" --pattern "$CHECKSUM_ASSET"; then
+            echo "failed to download $ASSET and/or $CHECKSUM_ASSET from $TAG" >&2
+            exit 1
+          fi
+          test -f "$ASSET"
+          test -f "$CHECKSUM_ASSET"
+
+          # Exact one non-empty line: lowercase-64-hex + two spaces + exact basename.
+          line_count="$(awk 'NF { c++ } END { print c+0 }' "$CHECKSUM_ASSET")"
+          if [[ "$line_count" != "1" ]]; then
+            echo "checksum sidecar must contain exactly one digest line" >&2
+            exit 1
+          fi
+          line="$(head -n 1 "$CHECKSUM_ASSET" | tr -d '\r')"
+          expected="${line%%  *}"
+          rest="${line#"$expected"}"
+          expected_suffix="  ${ASSET}"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$rest" != "$expected_suffix" ]]; then
+            echo "checksum sidecar must be '<64 lowercase hex><two spaces>$ASSET'" >&2
+            echo "got: $line" >&2
+            exit 1
+          fi
+
+          actual="$(shasum -a 256 "$ASSET" | awk '{ print $1 }')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "SHA-256 mismatch for $ASSET" >&2
+            echo "  expected: $expected" >&2
+            echo "  actual:   $actual" >&2
+            exit 1
+          fi
+
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
+
+      - name: Render cask from template (no injectable sed)
+        id: cask
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.asset.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          template="packaging/homebrew/semantouch.rb.in"
+          if [[ ! -f "$template" ]]; then
+            # Backward-compatible fallback if only the Casks copy exists.
+            template="packaging/homebrew/Casks/semantouch.rb"
+          fi
+          test -f "$template"
+          rendered="$(mktemp "${TMPDIR:-/tmp}/semantouch.rb.XXXXXX")"
+
+          # Validate placeholders before substitution: version/sha must be safe tokens.
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "refusing to render cask with non-semver VERSION=$VERSION" >&2
+            exit 1
+          fi
+          if [[ ! "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "refusing to render cask with non-hex SHA256" >&2
+            exit 1
+          fi
+
+          # Safe substitution via Python (no shell/sed interpolation of values into code).
+          python3 -c "import pathlib,sys; t,r,v,s=sys.argv[1:5]; text=pathlib.Path(t).read_text(encoding='utf-8'); assert '@VERSION@' in text and '@SHA256@' in text; out=text.replace('@VERSION@',v).replace('@SHA256@',s); assert '@VERSION@' not in out and '@SHA256@' not in out; pathlib.Path(r).write_text(out,encoding='utf-8')" "$template" "$rendered" "$VERSION" "$SHA256"
+
+          if ! grep -F "version \"${VERSION}\"" "$rendered" >/dev/null; then
+            echo "rendered cask missing version ${VERSION}" >&2
+            exit 1
+          fi
+          if ! grep -F "sha256 \"${SHA256}\"" "$rendered" >/dev/null; then
+            echo "rendered cask missing sha256 ${SHA256}" >&2
+            exit 1
+          fi
+          if ! grep -F "Semantouch-v#{version}-macos-universal2.zip" "$rendered" >/dev/null; then
+            echo "rendered cask must point at the universal2 ZIP" >&2
+            exit 1
+          fi
+          if ! grep -F 'app "Semantouch.app"' "$rendered" >/dev/null; then
+            echo "rendered cask must install Semantouch.app whole" >&2
+            exit 1
+          fi
+
+          # Syntax check the rendered Ruby cask. Full `brew audit` needs a tap
+          # context; keep structural contract checks above and Ruby parse here.
+          ruby -c "$rendered" >/dev/null
+          if command -v brew >/dev/null 2>&1; then
+            # Best-effort style when brew is present; do not require tap membership.
+            brew style --formulae-cask "$rendered" 2>/dev/null || brew style "$rendered" 2>/dev/null || true
+          fi
+
+          echo "rendered=$rendered" >> "$GITHUB_OUTPUT"
+          echo "----- rendered cask -----"
+          cat "$rendered"
+
+      - name: Publish cask to homebrew tap (write-scoped deploy key, retry rebase)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.asset.outputs.sha256 }}
+          RENDERED: ${{ steps.cask.outputs.rendered }}
+          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'watzon/homebrew-tap' }}
+        run: |
+          set -euo pipefail
+          : "${HOMEBREW_TAP_DEPLOY_KEY:?HOMEBREW_TAP_DEPLOY_KEY is required}"
+          test -f "$RENDERED"
+
+          key_file="$RUNNER_TEMP/semantouch-homebrew-deploy-key"
+          known_hosts="$RUNNER_TEMP/semantouch-homebrew-known-hosts"
+          cleanup_auth() {
+            rm -f "$key_file" "$known_hosts"
+          }
+          trap cleanup_auth EXIT HUP INT TERM
+          umask 077
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > "$known_hosts"
+          test -s "$known_hosts"
+          export GIT_SSH_COMMAND="/usr/bin/ssh -i $key_file -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+
+          # Semver compare: reject downgrades against the tap tip.
+          version_lt() {
+            # returns 0 if $1 < $2 (MAJOR.MINOR.PATCH; pre-release sorts lower than release)
+            python3 -c "import sys; p=lambda v: (tuple(int(x) for x in v.split('-',1)[0].split('+',1)[0].split('.')), (0 if '-' in v.split('+',1)[0] else 1), (v.split('-',1)+[''])[1].split('+',1)[0]); a,b=p(sys.argv[1]),p(sys.argv[2]); sys.exit(0 if a<b else 1)" "$1" "$2"
+          }
+
+          attempt=0
+          max_attempts=5
+          while (( attempt < max_attempts )); do
+            attempt=$((attempt + 1))
+            work="$(mktemp -d "${TMPDIR:-/tmp}/semantouch-homebrew-tap.XXXXXX")"
+            # Always fresh clone so newest tip wins over a stale workspace.
+            if ! git clone --depth 50 "git@github.com:${TAP_REPO}.git" "$work"; then
+              echo "git clone failed (attempt $attempt)" >&2
+              rm -rf "$work"
+              sleep $((attempt * 2))
+              continue
+            fi
+
+            mkdir -p "$work/Casks"
+            dest="$work/Casks/semantouch.rb"
+
+            if [[ -f "$dest" ]]; then
+              existing_version="$(python3 -c "import pathlib,re,sys; t=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'); m=re.search(r'version\s+\"([^\"]+)\"', t); assert m, 'could not parse existing cask version'; print(m.group(1))" "$dest")"
+              if [[ "$existing_version" == "$VERSION" ]]; then
+                existing_sha="$(python3 -c "import pathlib,re,sys; t=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'); m=re.search(r'sha256\s+\"([0-9a-f]{64})\"', t); print(m.group(1) if m else '')" "$dest")"
+                if [[ "$existing_sha" == "$SHA256" ]]; then
+                  echo "cask already up to date for v${VERSION}"
+                  rm -rf "$work"
+                  exit 0
+                fi
+                echo "cask version $VERSION already published with different sha256; refusing mutation" >&2
+                rm -rf "$work"
+                exit 1
+              fi
+              if version_lt "$VERSION" "$existing_version"; then
+                echo "refusing downgrade: tap has $existing_version, attempted $VERSION" >&2
+                rm -rf "$work"
+                exit 1
+              fi
+            fi
+
+            cp "$RENDERED" "$dest"
+            cd "$work"
+            git config user.name "semantouch-homebrew-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            # First publish: dest may be untracked; always stage explicitly.
+            git add -- "Casks/semantouch.rb"
+            if git diff --cached --quiet -- "Casks/semantouch.rb"; then
+              echo "cask already up to date for v${VERSION}"
+              rm -rf "$work"
+              exit 0
+            fi
+
+            git commit -m "semantouch ${VERSION} (universal2 ZIP)"
+
+            # Pull --rebase then push; retry on race with another publisher.
+            if git pull --rebase --autostash origin HEAD \
+              && git push origin HEAD; then
+              echo "published semantouch ${VERSION} to ${TAP_REPO}"
+              rm -rf "$work"
+              exit 0
+            fi
+
+            echo "push/rebase failed (attempt $attempt); retrying with fresh clone..." >&2
+            cd /
+            rm -rf "$work"
+            sleep $((attempt * 2))
+          done
+
+          echo "failed to publish cask after ${max_attempts} attempts" >&2
+          exit 1

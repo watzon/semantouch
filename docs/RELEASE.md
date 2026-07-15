@@ -2,9 +2,27 @@
 
 GitHub releases are tag-driven. The
 [`Release` workflow](../.github/workflows/release.yml) tests the tagged commit on a
-macOS arm64 runner, imports the publisher's Developer ID certificate into an ephemeral
-keychain, signs with Hardened Runtime, notarizes the executable, and publishes only after
-Apple returns `Accepted`.
+macOS arm64 runner, builds **universal2** host + relay slices, assembles
+`Semantouch.app`, imports the publisher's Developer ID certificate into an ephemeral
+keychain, signs with Hardened Runtime, notarizes and staples the app, packages
+immutable ZIP + DMG (+ SHA-256 sidecars) and a script-only plugin archive, and publishes
+only after Apple returns `Accepted`.
+
+Public computer-use support remains **macOS only**. Windows/Linux GA is not claimed.
+
+## Version and identity (current)
+
+| Field | Value | Source |
+|---|---|---|
+| Version | `0.3.0` | `Sources/MCPServer/MCPServer.swift` `serverVersion`, `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
+| Bundle id | `tech.watzon.semantouch` | `Sources/SemantouchCLIKit/Packaging.swift` `bundleId` |
+| Host executable | `SemantouchHost` | `Packaging.hostExecutableName` |
+| Nested relay | `semantouch` | `Packaging.relayExecutableName` |
+| Team | `MB5789APU7` | `Packaging.teamIdentifier` |
+| Min macOS | `14.0` | `Packaging.minimumMacOS`, `Package.swift` `.macOS(.v14)` |
+| Architectures | `arm64`, `x86_64` (universal2) | `Packaging.architectures`, release workflow lipo steps |
+| MCP protocol | `2025-06-18` | `MCPServer.mcpProtocolVersion` |
+| Contract | `semantouch/1` | `MCPServer.contractVersion` |
 
 ## Automated GitHub release
 
@@ -13,10 +31,12 @@ Before tagging, update the release version in:
 - `MCPServer.serverVersion` in `Sources/MCPServer/MCPServer.swift`,
 - `package.json`,
 - `.claude-plugin/plugin.json`,
-- `.claude-plugin/marketplace.json` (`metadata.version` and the plugin entry).
+- `.claude-plugin/marketplace.json` (`metadata.version` and the plugin entry),
+- and keep `npm/semantouch/package.json` aligned if the npm workflow will run.
 
-Regenerate the binary-derived files in `packaging/` with `just packaging`, then verify the
-mirrored distribution metadata against the built executable:
+Regenerate the binary-derived files in `packaging/` with `just packaging` (or the
+`semantouch config` generators), then verify mirrored distribution metadata against the
+built relay:
 
 ```sh
 swift build -c release --product semantouch
@@ -26,28 +46,70 @@ scripts/verify-release-metadata "$(swift build -c release --show-bin-path)/seman
 Create and push a matching `v<version>` tag:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-The workflow rejects a tag that does not exactly match the package and binary version.
-It publishes four assets:
+The workflow rejects a tag that does not exactly match the package and binary version,
+and refuses tags that are not on approved `main` history
+(`.github/workflows/release.yml`).
 
-- `semantouch-macos-arm64` — the executable used by the plugin launcher,
-- `semantouch-macos-arm64.sha256` — its checksum,
-- `semantouch-plugin-v<version>-macos-arm64.tar.gz` — a self-contained plugin bundle,
-- `semantouch-plugin-v<version>-macos-arm64.tar.gz.sha256` — the bundle checksum.
+### Assets published by the current workflow
 
-Published release assets are immutable. A retry may replace an unpublished draft left by
-a failed upload, but it refuses to overwrite an existing published version. Fixes that
-change release bytes require a new version and tag.
+For a successful new tag, the workflow uploads exactly these six files
+(`.github/workflows/release.yml` "Create GitHub release and upload assets"):
 
-The regular [`CI` workflow](../.github/workflows/ci.yml) builds, tests, and checks the
-same version invariant on pull requests and pushes to `main`.
+- `Semantouch-v<version>-macos-universal2.zip`
+- `Semantouch-v<version>-macos-universal2.zip.sha256`
+- `Semantouch-v<version>-macos-universal2.dmg`
+- `Semantouch-v<version>-macos-universal2.dmg.sha256`
+- `semantouch-plugin-v<version>-macos-universal2.tar.gz`
+- `semantouch-plugin-v<version>-macos-universal2.tar.gz.sha256`
+
+Asset names are also encoded in `Packaging.appZipAssetName` /
+`appDmgAssetName` (`Sources/SemantouchCLIKit/Packaging.swift`).
+
+The workflow **refuses** to emit or publish a raw helper such as
+`semantouch-macos-arm64` or `semantouch-macos-universal2`. The plugin archive is
+script/config-only and is checked for absence of Mach-O binaries.
+
+### Immutable release contract
+
+Published release assets are immutable. The workflow never deletes/recreates an existing
+draft or published release for the same tag (fails closed if the tag already has a
+release). Fixes that change release bytes require a new version and tag.
+
+### Published `v0.2.1` mismatch (do not paper over)
+
+`gh release view v0.2.1` currently lists the **legacy** assets:
+
+- `semantouch-macos-arm64`
+- `semantouch-macos-arm64.sha256`
+- `semantouch-plugin-v0.2.1-macos-arm64.tar.gz`
+- `semantouch-plugin-v0.2.1-macos-arm64.tar.gz.sha256`
+
+Those match an earlier arm64-helper packaging shape, **not** the universal2 app assets
+named above. Install docs distinguish that published tag from next-release artifacts
+([INSTALL.md](INSTALL.md)). Do not claim that `v0.2.1` already ships the universal2 ZIP/DMG.
+
+### Downstream publish workflows (unproven until ZIP exists)
+
+| Workflow | Trigger | Requirement | Public status |
+|---|---|---|---|
+| [`.github/workflows/npm.yml`](../.github/workflows/npm.yml) | tag / dispatch | waits for published `Semantouch-v*-macos-universal2.zip` + `.sha256`, verifies app, pins digest, `npm publish --provenance` | **Unproven public** until a tag with those assets is published and the job succeeds |
+| [`.github/workflows/homebrew.yml`](../.github/workflows/homebrew.yml) | release published / dispatch | same ZIP + checksum; renders cask; pushes tap | **Unproven public** until a successful cask publish |
+
+Do not document npm or Homebrew as current public install channels before that proof.
+
+The regular [`CI` workflow](../.github/workflows/ci.yml) builds, tests, and checks version
+invariants on pull requests and pushes to `main`.
 
 ## Signing credentials
 
-The release workflow requires five GitHub Actions secrets:
+The release workflow requires five secrets scoped to the protected
+`release-signing` environment. Do not store these as repository-level secrets:
+that wider scope would let an unrelated workflow request them without crossing
+the release environment's reviewer and `v*` tag policy.
 
 | Secret | Value |
 |---|---|
@@ -62,21 +124,28 @@ identity from Keychain Access as a password-protected `.p12`. The notarization v
 mirror Pindrop's working Apple Account and app-specific-password authentication:
 
 ```sh
-base64 < DeveloperIDApplication.p12 | gh secret set DEVELOPER_ID_CERTIFICATE_P12_BASE64
-gh secret set DEVELOPER_ID_CERTIFICATE_PASSWORD
-gh secret set APPLE_NOTARY_APPLE_ID
-gh secret set APPLE_NOTARY_APP_SPECIFIC_PASSWORD
-gh secret set APPLE_NOTARY_TEAM_ID
+base64 < DeveloperIDApplication.p12 \
+  | gh secret set DEVELOPER_ID_CERTIFICATE_P12_BASE64 \
+      --env release-signing --repo watzon/semantouch
+gh secret set DEVELOPER_ID_CERTIFICATE_PASSWORD --env release-signing --repo watzon/semantouch
+gh secret set APPLE_NOTARY_APPLE_ID --env release-signing --repo watzon/semantouch
+gh secret set APPLE_NOTARY_APP_SPECIFIC_PASSWORD --env release-signing --repo watzon/semantouch
+gh secret set APPLE_NOTARY_TEAM_ID --env release-signing --repo watzon/semantouch
 ```
 
+After all five environment secrets are present, delete any same-named
+repository-level copies and confirm `gh secret list --env release-signing
+--repo watzon/semantouch` lists exactly the five names before tagging.
+
 The workflow creates a temporary keychain, imports the `.p12`, sets the codesign
-partition list, and deletes the keychain and decoded credentials even after a failure.
-Missing credentials fail the release; it never falls back to an ad-hoc build.
+partition list, and deletes the keychain and decoded credentials even after a failure
+(`.github/workflows/release.yml` cleanup step). Missing credentials fail the release; it
+never falls back to an ad-hoc build.
 
 ## Local Pindrop-style signing
 
-The local flow mirrors Pindrop's Developer ID and Apple Account
-`notarytool` keychain-profile setup:
+The local flow mirrors Pindrop's Developer ID and Apple Account `notarytool`
+keychain-profile setup:
 
 ```sh
 security find-identity -v -p codesigning
@@ -85,47 +154,60 @@ xcrun notarytool store-credentials notarytool-password \
   --team-id MB5789APU7 \
   --password <app-specific-password>
 
-just signed-release
-just notarize-release
-just verify-signed-release
+# Build host + relay, assemble app, sign, notarize, package — use the scripts
+# exercised by .github/workflows/release.yml:
+scripts/assemble-app dist/SemantouchHost dist/semantouch dist/Semantouch.app
+scripts/sign-release dist/Semantouch.app "Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
+scripts/notarize-release dist/Semantouch.app
+SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release dist/Semantouch.app 0.3.0
+scripts/package-app-release dist/Semantouch.app dist 0.3.0 \
+  "Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
 ```
 
-`just signed-release` uses the generic `Developer ID Application` selector by default;
-pass the exact identity as its argument if codesign reports an ambiguous match. The
-signed binary is `dist/semantouch-macos-arm64`.
+If local `just` recipes still name arm64 helper paths, prefer the scripts above for the
+app-host contract. Exact recipe names may lag; the workflow is normative for asset shape.
 
 ## 0. Publisher identity
 
 The manifest uses the owned `tech.watzon.semantouch` identifier and reports
-`bundleIdIsPlaceholder: false`. The workflow and local signing helper pass the same
-identifier to `codesign`. It must remain aligned with
-`Packaging.bundleId` in `Sources/ComputerUseService/Packaging.swift`.
+`bundleIdIsPlaceholder: false` (`packaging/semantouch.plugin.json`). The workflow and
+local signing helper pass the same identifier to `codesign`. It must remain aligned with
+`Packaging.bundleId` in `Sources/SemantouchCLIKit/Packaging.swift`. Nested relay code
+identifier is `tech.watzon.semantouch.cli`.
 
-## 1. Choose a packaging shape
+## 1. Packaging shape: whole app + nested relay
 
-Two options; the TCC identity differs:
+The supported distribution shape is **`Semantouch.app`**:
 
-- **Single binary** — sign `semantouch` directly. Simplest; the granted item is the
-  binary path.
-- **`.app` bundle** — e.g. `Semantouch.app/Contents/MacOS/semantouch` with an
-  `Info.plist`. The granted item is the bundle. Recommended for distribution because it
-  carries an `Info.plist` (usage strings, `LSUIElement`, minimum-OS) and a stable identity.
+```text
+Semantouch.app/
+  Contents/
+    Info.plist
+    MacOS/
+      SemantouchHost     # TCC owner, engines, host socket
+      semantouch         # public stdio/control relay (OMP command)
+```
 
-Suggested `Info.plist` keys for the `.app`:
+TCC identity is the **app host** (bundle id + `SemantouchHost`), not the nested relay
+(`Packaging.tccOwnershipDescription`). The release workflow packages that app into ZIP and
+DMG; it does not publish a raw helper.
+
+Suggested `Info.plist` keys (assembled by `scripts/assemble-app`; values must match
+packaging constants):
 
 ```xml
 <key>CFBundleIdentifier</key>        <string>tech.watzon.semantouch</string>
-<key>CFBundleExecutable</key>        <string>semantouch</string>
-<key>CFBundleShortVersionString</key> <string>0.2.1</string>                        <!-- match MCPServer.serverVersion -->
-<key>LSMinimumSystemVersion</key>    <string>14.4</string>
-<key>LSUIElement</key>               <true/>   <!-- background/accessory: no Dock icon, no menu bar -->
+<key>CFBundleExecutable</key>        <string>SemantouchHost</string>
+<key>CFBundleShortVersionString</key> <string>0.3.0</string>   <!-- match MCPServer.serverVersion -->
+<key>LSMinimumSystemVersion</key>    <string>14.0</string>
+<key>LSUIElement</key>               <true/>   <!-- accessory: no Dock icon, no menu bar -->
 ```
 
 ## 2. Entitlements
 
 Hardened Runtime is required for notarization. Accessibility and Screen Recording are
 user-consented TCC permissions, not entitlements; no entitlement can grant either one.
-The user still approves the signed binary at runtime (INSTALL.md §2).
+The user still approves the signed app at runtime ([INSTALL.md](INSTALL.md) §2).
 
 The checked-in [`packaging/Release.entitlements`](../packaging/Release.entitlements) is
 intentionally empty. Hardened Runtime is enabled with the `codesign --options runtime`
@@ -141,22 +223,29 @@ needed. If a future capability requires an entitlement, review it before adding.
 
 ## 3. Sign with Hardened Runtime
 
-Sign inner Mach-O first (if an `.app`), then the bundle, with a secure timestamp and the
-runtime option:
+Sign nested Mach-Os first, then the bundle, with a secure timestamp and the runtime
+option (`scripts/sign-release` is the preferred entry; the release workflow calls it):
 
 ```sh
-# Single binary:
+# Preferred: whole app (inside-out)
 scripts/sign-release \
-  "$(swift build -c release --show-bin-path)/semantouch" \
+  "dist/Semantouch.app" \
   "Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
+```
 
-# Or an .app bundle (sign nested executable, then the bundle):
+Manual equivalent shape:
+
+```sh
 codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: Your Name (TEAMID)" \
+  --sign "Developer ID Application: Watzon Ventures LLc (MB5789APU7)" \
   --entitlements packaging/Release.entitlements \
   "Semantouch.app/Contents/MacOS/semantouch"
 codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: Your Name (TEAMID)" \
+  --sign "Developer ID Application: Watzon Ventures LLc (MB5789APU7)" \
+  --entitlements packaging/Release.entitlements \
+  "Semantouch.app/Contents/MacOS/SemantouchHost"
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: Watzon Ventures LLc (MB5789APU7)" \
   --entitlements packaging/Release.entitlements \
   "Semantouch.app"
 ```
@@ -165,17 +254,20 @@ Verify:
 
 ```sh
 codesign --verify --strict --verbose=2 "Semantouch.app"
-codesign --display --entitlements - "Semantouch.app/Contents/MacOS/semantouch"
-spctl --assess --type execute --verbose "Semantouch.app"   # after notarization
+codesign --display --entitlements - "Semantouch.app/Contents/MacOS/SemantouchHost"
+SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release "Semantouch.app" "0.3.0"
+spctl --assess --type execute --verbose "Semantouch.app"   # after notarization/staple
 ```
 
 ## 4. Notarize with notarytool
 
-Zip the signed artifact, submit, and wait:
+The release workflow calls `scripts/notarize-release` on the app (and again on the DMG).
+Locally:
 
 ```sh
+scripts/notarize-release "Semantouch.app"
+# or manually:
 ditto -c -k --keepParent "Semantouch.app" "Semantouch.zip"
-
 xcrun notarytool submit "Semantouch.zip" \
   --keychain-profile notarytool-password \
   --wait
@@ -191,29 +283,35 @@ xcrun notarytool log <submission-id> \
 
 ## 5. Staple
 
-Stapling is supported for the `.app` distribution:
+Stapling is supported for the `.app` and `.dmg` containers:
 
 ```sh
 xcrun stapler staple "Semantouch.app"
 xcrun stapler validate "Semantouch.app"
+xcrun stapler staple "Semantouch-v0.3.0-macos-universal2.dmg"
+xcrun stapler validate "Semantouch-v0.3.0-macos-universal2.dmg"
 ```
 
 A standalone executable may be submitted inside an archive, but the executable itself
 cannot carry a stapled ticket; Gatekeeper must retrieve its notarization result online.
-If offline validation is required, distribute and staple a supported `.app`, `.pkg`, or
-`.dmg` container.
+New releases intentionally distribute the stapled `.app` (ZIP) and stapled `.dmg` instead
+of a raw helper.
 
-## 6. The signed binary is the one that gets the TCC grants
+## 6. The signed app host is the one that gets the TCC grants
 
-**Critical:** macOS keys Accessibility and Screen Recording to the binary's *code
-signature and path*. An ad-hoc `swift build` binary and the signed release are different
-identities — a grant given to the dev build does **not** carry over. After installing the
-signed build:
+**Critical:** macOS keys Accessibility and Screen Recording to the host process's *code
+signature / bundle identity*. An ad-hoc `swift build` host and the signed release are
+different identities — a grant given to the dev build does **not** carry over. After
+installing the signed app:
 
-1. Run `semantouch doctor` and read the `helper:` path and `signed: true`.
-2. Grant **that** signed binary/bundle Accessibility and Screen Recording (INSTALL.md §2).
+1. Run `semantouch doctor` and read the `helper:` path (should be `…/SemantouchHost`) and
+   `signed: true`.
+2. Grant **that** signed host/bundle Accessibility and Screen Recording
+   ([INSTALL.md](INSTALL.md) §2).
 3. Re-sign ⇒ re-grant: any change that alters the signature (a new build, a new
    certificate) can invalidate the existing grant; re-check `doctor` and re-add if needed.
+
+The nested relay does not hold TCC (`Packaging.tccOwnershipDescription`).
 
 ## 7. Update the packaging artifacts
 
@@ -227,4 +325,5 @@ semantouch config            --path "/Applications/Semantouch.app/Contents/MacOS
 
 `MCPServer.serverVersion` remains the runtime source for `--version`, `doctor`,
 `serverInfo`, and the generated packaging manifest. The distribution manifests mirror
-that value; `scripts/verify-release-metadata` and both workflows reject drift.
+that value; `scripts/verify-release-metadata` and the workflows reject drift. Tool list
+in the manifest is `ToolCatalog.enabled` (16 tools).

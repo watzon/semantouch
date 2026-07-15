@@ -54,6 +54,62 @@ public struct ToolInvalidArguments: Error, Equatable, Sendable {
 /// throw becomes a tool-level `internal_error`.
 public typealias ToolHandler = @Sendable (JSONValue) async throws -> ToolResult
 
+/// Conservative MCP behavior hints emitted with every tool descriptor.
+///
+/// These are client-facing scheduling and approval hints, not an authorization
+/// boundary. Semantouch still enforces policy and revision checks server-side.
+struct ToolAnnotations: Sendable {
+    let readOnly: Bool
+    let destructive: Bool
+    let idempotent: Bool
+    let openWorld: Bool
+
+    var json: JSONValue {
+        [
+            "readOnlyHint": .bool(readOnly),
+            "destructiveHint": .bool(destructive),
+            "idempotentHint": .bool(idempotent),
+            "openWorldHint": .bool(openWorld),
+        ]
+    }
+
+    static func forTool(named name: String) -> ToolAnnotations {
+        switch name {
+        case "list_apps", "get_app_state", "read_text", "screenshot", "wait_for":
+            return ToolAnnotations(
+                readOnly: true,
+                destructive: false,
+                idempotent: true,
+                openWorld: true
+            )
+        case "doctor":
+            // requestOnboarding can show an OS permission prompt, so the tool as
+            // a whole cannot honestly claim to be read-only.
+            return ToolAnnotations(
+                readOnly: false,
+                destructive: false,
+                idempotent: true,
+                openWorld: true
+            )
+        case "end_app_session":
+            return ToolAnnotations(
+                readOnly: false,
+                destructive: false,
+                idempotent: true,
+                openWorld: false
+            )
+        default:
+            // UI mutations can trigger arbitrary effects in the target app.
+            return ToolAnnotations(
+                readOnly: false,
+                destructive: true,
+                idempotent: false,
+                openWorld: true
+            )
+        }
+    }
+}
+
 /// A registered tool: its identity, frozen JSON Schema (§4), and handler.
 public struct Tool: Sendable {
     public let name: String
@@ -68,12 +124,15 @@ public struct Tool: Sendable {
         self.handler = handler
     }
 
-    /// The `{ name, description, inputSchema }` descriptor emitted by `tools/list` (§2).
+    /// The `{ name, description, inputSchema, annotations }` descriptor emitted by
+    /// `tools/list` (§2). Annotations are conservative client hints; policy remains
+    /// server-enforced.
     public var descriptor: JSONValue {
         [
             "name": .string(name),
             "description": .string(description),
             "inputSchema": inputSchema,
+            "annotations": ToolAnnotations.forTool(named: name).json,
         ]
     }
 }
@@ -125,7 +184,7 @@ public final class ToolRegistry: @unchecked Sendable {
 }
 
 public extension ToolRegistry {
-    /// Build the full 14-tool registry from `ToolSchemas`, defaulting to the Phase-1
+    /// Build the full tool registry from `ToolSchemas`, defaulting to the currently
     /// enabled set. Real handlers are injected by name; any tool without an injected
     /// handler gets a placeholder that throws `internal_error` (never reached for a
     /// disabled tool, which short-circuits to `policy_denied` before dispatch).
@@ -151,7 +210,8 @@ public extension ToolRegistry {
 // MARK: - Minimal JSON Schema validation
 
 /// A focused validator for the JSON Schema subset the tool schemas use (§4): `type`
-/// (single or union), `enum`, `minimum`, `maximum`, `pattern`, for objects `required`,
+/// (single or union), `enum`, `minimum`, `maximum`, `pattern`, `oneOf` (exactly one
+/// alternative must match — used by `read_text.limit`), for objects `required`,
 /// `additionalProperties: false`, and recursion into declared `properties`, and for
 /// arrays recursion into the declared `items` subschema. Returns `nil` when valid,
 /// else a human-readable reason. This is intentionally not a full JSON Schema
@@ -160,6 +220,16 @@ public enum SchemaValidator {
     /// Validate `value` against `schema`; `nil` means valid.
     public static func validate(_ value: JSONValue, schema: JSONValue) -> String? {
         guard case let .object(schemaObject) = schema else { return nil }
+
+        // `oneOf`: exactly one alternative must accept the value. Checked before a
+        // sibling `type` so a pure union schema (e.g. read_text.limit) is not
+        // short-circuited by an absent outer type. Other keywords still apply when
+        // present alongside `oneOf`.
+        if let oneOfNode = schemaObject["oneOf"], case let .array(alternatives) = oneOfNode {
+            if let reason = validateOneOf(value, alternatives: alternatives) {
+                return reason
+            }
+        }
 
         if let typeNode = schemaObject["type"], !matchesType(value, typeNode) {
             return "expected type \(describeType(typeNode))"
@@ -194,6 +264,21 @@ public enum SchemaValidator {
         }
 
         return nil
+    }
+
+    /// JSON Schema `oneOf`: the value must match **exactly one** alternative.
+    private static func validateOneOf(_ value: JSONValue, alternatives: [JSONValue]) -> String? {
+        var matchCount = 0
+        for alternative in alternatives {
+            if validate(value, schema: alternative) == nil {
+                matchCount += 1
+            }
+        }
+        if matchCount == 1 { return nil }
+        if matchCount == 0 {
+            return "value does not match any oneOf alternative"
+        }
+        return "value matches more than one oneOf alternative"
     }
 
     /// Validate an array's length bounds (`minItems`/`maxItems`, used by `wait_for.conditions`,

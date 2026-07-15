@@ -9,17 +9,61 @@ public enum InterferencePolicy: String, Codable, Equatable, Sendable, CaseIterab
 
 /// Per-application policy gate for computer-use access.
 ///
-/// The default is deliberately permissive: no application is denied unless the
-/// operator names it in `SEMANTOUCH_DENIED_APPS`. The denylist applies to both reads
-/// and mutations, and matches exact, case-insensitive application identity tokens
-/// (bundle identifier, display name, full path, or the path's last component).
+/// By default, common password managers are denied. Operators can augment that
+/// set with `SEMANTOUCH_DENIED_APPS` (comma-separated exact identity tokens).
+/// Setting `SEMANTOUCH_ALLOW_SENSITIVE_APPS` to exactly `1` disables the built-in
+/// sensitive denylist; operator deny entries still apply. Callers that pass an
+/// explicit `appDenylist` keep that exact set for deterministic tests and
+/// configuration. Matching is case-insensitive against bundle identifier,
+/// display name, full path, or the path's last component — never substrings.
 public struct PolicyEngine: Sendable {
     public var defaultInterference: InterferencePolicy
     public let appDenylist: Set<String>
 
+    /// Canonical, case-insensitive identity tokens for password managers denied
+    /// by default. Exact tokens only: stable bundle IDs plus common display and
+    /// `.app` basenames — no broad substring matching.
+    public static let defaultSensitiveAppDenylist: Set<String> = Set(
+        [
+            // 1Password
+            "com.1password.1password",
+            "com.agilebits.onepassword7",
+            "1Password",
+            "1Password 7",
+            "1Password.app",
+            "1Password 7.app",
+            // Bitwarden
+            "com.bitwarden.desktop",
+            "Bitwarden",
+            "Bitwarden.app",
+            // Dashlane
+            "com.dashlane.dashlanephonefinal",
+            "com.dashlane.Dashlane",
+            "Dashlane",
+            "Dashlane.app",
+            // LastPass
+            "com.lastpass.LastPass",
+            "com.lastpass.lastpassmacdesktop",
+            "LastPass",
+            "LastPass.app",
+            // NordPass
+            "com.nordsec.nordpass",
+            "NordPass",
+            "NordPass.app",
+            // Proton Pass
+            "me.proton.pass.electron",
+            "me.proton.pass.catalyst",
+            "Proton Pass",
+            "Proton Pass.app",
+        ].map { $0.lowercased() }
+    )
+
+    /// - Parameter appDenylist: Exact denylist to use. When omitted, the built-in
+    ///   sensitive-app denylist is applied. Passing a value (including `[]`) uses
+    ///   that set as-is with no automatic merge.
     public init(
         defaultInterference: InterferencePolicy = .backgroundOnly,
-        appDenylist: Set<String> = []
+        appDenylist: Set<String> = PolicyEngine.defaultSensitiveAppDenylist
     ) {
         self.defaultInterference = defaultInterference
         self.appDenylist = Set(appDenylist.map { $0.lowercased() })
@@ -43,14 +87,30 @@ public struct PolicyEngine: Sendable {
         return result
     }
 
-    /// Construct the process-wide policy from `SEMANTOUCH_DENIED_APPS`.
+    /// Whether built-in sensitive-app protection is disabled for this environment.
+    /// Only the exact value `1` opts out; any other or missing value keeps built-ins.
+    public static func allowsSensitiveApps(
+        environment: [String: String]
+    ) -> Bool {
+        environment["SEMANTOUCH_ALLOW_SENSITIVE_APPS"] == "1"
+    }
+
+    /// Construct the process-wide policy from the environment.
+    ///
+    /// `SEMANTOUCH_DENIED_APPS` always augments the active denylist. Built-in
+    /// password-manager protection is included unless
+    /// `SEMANTOUCH_ALLOW_SENSITIVE_APPS` is exactly `1`.
     public static func system(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> PolicyEngine {
-        PolicyEngine(appDenylist: appDenylistFrom(environment: environment))
+        let operatorDeny = appDenylistFrom(environment: environment)
+        if allowsSensitiveApps(environment: environment) {
+            return PolicyEngine(appDenylist: operatorDeny)
+        }
+        return PolicyEngine(appDenylist: defaultSensitiveAppDenylist.union(operatorDeny))
     }
 
-    /// Return whether an application matches the operator-configured denylist.
+    /// Return whether an application matches the configured denylist.
     public func isAppDenied(
         bundleId: String?,
         displayName: String?,
@@ -60,7 +120,7 @@ public struct PolicyEngine: Sendable {
             .isDisjoint(with: appDenylist)
     }
 
-    /// Read-only access uses the same operator denylist as mutation access.
+    /// Read-only access uses the same denylist as mutation access.
     public func readDenialReason(
         bundleId: String?,
         displayName: String?,
@@ -71,7 +131,7 @@ public struct PolicyEngine: Sendable {
             : nil
     }
 
-    /// Mutations are permitted unless the target matches the operator denylist.
+    /// Mutations are permitted unless the target matches the denylist.
     public func mutationDenialReason(
         bundleId: String?,
         displayName: String?,

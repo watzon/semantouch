@@ -6,11 +6,17 @@ import CursorOverlay
 import AppKit
 #endif
 
-/// Entry point for the `mcp` subcommand: build the Phase 1 registry over a fresh
-/// `ServiceContext` and serve newline-delimited JSON-RPC over stdio until EOF (§1).
+/// Entry point for the MCP serve loop: build the Phase 1 registry over a fresh
+/// `ServiceContext` and serve newline-delimited JSON-RPC over an injected
+/// input/output pair (default: stdio) until EOF (§1).
 ///
-/// The `MCPServer` owns stdout; this function writes nothing to stdout itself. It blocks the
-/// calling (main) thread until stdin closes, then returns for a clean shutdown.
+/// The transport owns the output handle; this function writes nothing to it itself.
+/// It blocks the calling thread until the input closes, then returns for a clean
+/// shutdown.
+///
+/// Hosted connections (app host socket) inject socket-backed `FileHandle`s so each
+/// MCP connection gets an isolated runtime/context without sharing revisions or
+/// stable element ids across peers or restarts.
 ///
 /// ## Threading model (persistent-cursor task)
 /// The virtual cursor overlay is a live `NSPanel`, and PUBLIC AppKit requires a main-thread run
@@ -33,20 +39,34 @@ import AppKit
 ///   before. This preserves the Stage H headless-safe proof (the `mcp` server creates zero
 ///   windows).
 ///
-/// Either way, stdin EOF and `SIGTERM` tear down the overlay and stop cleanly (bounded drain of
-/// in-flight work, no truncated final stdout line), then exit — no hang.
+/// Either way, input EOF and `SIGTERM` tear down the overlay and stop cleanly (bounded drain of
+/// in-flight work, no truncated final output line), then exit — no hang.
 public enum MCPRuntime {
-    /// Run the server to completion (returns on stdin EOF). When no context is supplied,
-    /// build one with the LIVE cursor overlay controller (Phase 5) — it self-guards on the
-    /// presence of an active display, so a headless invocation still creates no window.
-    public static func run(context: ServiceContext? = nil) {
+    /// Run the server to completion (returns on input EOF).
+    ///
+    /// - Parameters:
+    ///   - context: Optional pre-built context. When `nil`, a **fresh** `ServiceContext`
+    ///     is created for this call (live cursor overlay controller). Never reuse a
+    ///     context across connections.
+    ///   - input: Byte source for newline-delimited JSON-RPC (default: stdin).
+    ///   - output: Sink for framed replies (default: stdout).
+    ///
+    /// Default arguments preserve the historical stdio entrypoint:
+    /// `MCPRuntime.run()` is source-compatible with the previous signature.
+    public static func run(
+        context: ServiceContext? = nil,
+        input: FileHandle = .standardInput,
+        output: FileHandle = .standardOutput
+    ) {
+        // Fresh ServiceContext per call when none is injected — never share revisions
+        // / element tables / session state across MCP connections.
         let context = context ?? ServiceContext(cursorController: .system())
         // Start the passive user-interruption tap (Phase 4). Degrades gracefully if the tap
         // cannot be created (logged warning + per-action StateWarning), never a crash.
         context.startInterruptionMonitor()
         defer { context.stopInterruptionMonitor() }
         // Phase 5 (task step 1): tear down the persistent cursor overlay when the connection
-        // closes (stdin EOF returns from the serve loop below). Best-effort and inert when no
+        // closes (input EOF returns from the serve loop below). Best-effort and inert when no
         // overlay was ever shown or when headless. The SIGTERM path (below) tears down too.
         defer { context.cursorController.shutdown() }
         // v1.5 (§18.1): on shutdown, reset (to false) the web-AX attributes this server flipped
@@ -54,43 +74,64 @@ public enum MCPRuntime {
         // never touches an attribute that was already true before the server flipped it.
         defer { context.resetAllWebContentAccessibility() }
         let registry = ToolHandlers.registry(context: context)
-        let server = MCPServer(registry: registry)
+        // `notifications/turn-ended` is decorative only: hide/disarm the cursor overlay
+        // without ending app sessions. Cancellation stays fully inside MCPServer.
+        let transport = StdioTransport(input: input, output: output)
+        let server = MCPServer(transport: transport, registry: registry, onNotification: { method, _ in
+            guard method == "notifications/turn-ended" else { return }
+            context.cursorController.endTurn()
+        })
 
         // Process-level shutdown (PROTOCOL v1.4 §17): on SIGTERM, cancel any in-flight
-        // capture/tree-build work so nothing is orphaned, then exit cleanly. stdin EOF is
+        // capture/tree-build work so nothing is orphaned, then exit cleanly. Input EOF is
         // handled inside the serve loop (it cancels in-flight tokens and drains). Ignore the
         // default SIGTERM disposition and observe it on a dispatch source instead (the raw
         // signal handler context is too restricted to do this work).
-        signal(SIGTERM, SIG_IGN)
-        let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        sigterm.setEventHandler {
-            StdioTransport.log("semantouch: SIGTERM received; cancelling in-flight work")
-            server.cancelAllInFlight(reason: "sigterm")
-            // Server shutdown (task step 1): tear down the persistent cursor overlay.
-            context.cursorController.shutdown()
-            // v1.5 (§18.1): reset the web-AX attributes this server flipped across all sessions.
-            context.resetAllWebContentAccessibility()
-            // Briefly drain (bounded) so an in-flight handler can unwind and finish its
-            // `writeLine` before we exit — avoiding a truncated final stdout line (§17.4).
-            // A stuck handler cannot delay shutdown past the deadline. Same bound as the EOF
-            // drain in `MCPServer.run()` (symmetric shutdown, §17.4).
-            server.drainInFlight(deadline: .now() + .milliseconds(MCPServer.shutdownDrainMilliseconds))
-            exit(0)
+        //
+        // Only install SIGTERM for the process-default stdio path. Host-socket connections
+        // share the process with other sessions and must not exit the whole host.
+        let isProcessStdio =
+            input.fileDescriptor == FileHandle.standardInput.fileDescriptor
+            && output.fileDescriptor == FileHandle.standardOutput.fileDescriptor
+        var sigterm: DispatchSourceSignal?
+        if isProcessStdio {
+            signal(SIGTERM, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+            source.setEventHandler {
+                StdioTransport.log("semantouch: SIGTERM received; cancelling in-flight work")
+                server.cancelAllInFlight(reason: "sigterm")
+                // Server shutdown (task step 1): tear down the persistent cursor overlay.
+                context.cursorController.shutdown()
+                // v1.5 (§18.1): reset the web-AX attributes this server flipped across all sessions.
+                context.resetAllWebContentAccessibility()
+                // Briefly drain (bounded) so an in-flight handler can unwind and finish its
+                // `writeLine` before we exit — avoiding a truncated final stdout line (§17.4).
+                // A stuck handler cannot delay shutdown past the deadline. Same bound as the EOF
+                // drain in `MCPServer.run()` (symmetric shutdown, §17.4).
+                server.drainInFlight(deadline: .now() + .milliseconds(MCPServer.shutdownDrainMilliseconds))
+                exit(0)
+            }
+            source.resume()
+            sigterm = source
         }
-        sigterm.resume()
-        defer { sigterm.cancel() }
+        defer { sigterm?.cancel() }
 
         // Decide the runtime shape from the cursor preference + GUI availability. The decision
         // is a pure function (unit-tested over a fake environment); only the branch it selects
         // touches AppKit.
-        if shouldHostOverlay(
+        //
+        // Host-socket connections always take the headless serve path: the host process already
+        // owns the main AppKit run loop (status/onboarding UI). Overlay presentation still works
+        // because AppKitCursorPresenter marshals onto the main queue drained by the host.
+        if isProcessStdio,
+           shouldHostOverlay(
             environment: ProcessInfo.processInfo.environment,
             guiSessionAvailable: GUISession.isAvailable
-        ) {
+           ) {
             runHosted(server: server, context: context)
         } else {
-            // Headless: identical to the historical path — main thread serves, no NSApp, no
-            // window. Returns on stdin EOF after the bounded in-flight drain.
+            // Headless / host-socket: serve on the calling thread, no NSApp takeover.
+            // Returns on input EOF after the bounded in-flight drain.
             server.run()
         }
     }
@@ -121,11 +162,11 @@ public enum MCPRuntime {
         app.setActivationPolicy(.accessory)
 
         // Serve the MCP protocol off the main thread so the main run loop is free to host + draw
-        // the overlay. `server.run()` blocks until stdin EOF, cancelling in-flight tokens and
+        // the overlay. `server.run()` blocks until input EOF, cancelling in-flight tokens and
         // performing its own bounded drain before returning.
         let serveThread = Thread {
             server.run()
-            // Connection closed (stdin EOF): tear down the overlay, then stop the main run loop
+            // Connection closed (input EOF): tear down the overlay, then stop the main run loop
             // so `app.run()` returns and the process exits cleanly. Teardown is best-effort and
             // idempotent (the `run()` defers call `shutdown()` again after `app.run()` returns).
             context.cursorController.shutdown()

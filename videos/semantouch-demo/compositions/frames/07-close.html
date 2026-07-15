@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>07-close</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #173d2a;
+          font-family: sans-serif;
+          background-color: #f2efe5;
+          background-image:
+            linear-gradient(rgba(77, 245, 69, 0.1) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(77, 245, 69, 0.1) 1px, transparent 1px);
+          background-size: 38.4px 38.4px;
+        }
+        .hairline {
+          position: absolute;
+          left: 76.8px;
+          right: 76.8px;
+          border-top: 2.3px solid #173d2a;
+        }
+        .hairline.top {
+          top: 57.6px;
+        }
+        .hairline.bottom {
+          bottom: 57.6px;
+        }
+        .kicker {
+          position: absolute;
+          top: 90px;
+          left: 96px;
+          font-weight: 600;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          font-size: 13px;
+        }
+        .headline {
+          position: absolute;
+          top: 150px;
+          left: 96px;
+          right: 96px;
+          font-family: serif;
+          font-size: 72px;
+          line-height: 0.95;
+          letter-spacing: -0.008em;
+        }
+        .app {
+          position: absolute;
+          top: 360px;
+          left: 96px;
+          width: 720px;
+        }
+        .app-name {
+          font-family: serif;
+          font-size: 36px;
+          margin-bottom: 18px;
+        }
+        .row {
+          display: grid;
+          grid-template-columns: 180px 1fr;
+          gap: 10px;
+          font-family: monospace;
+          font-size: 15px;
+          padding: 8px 0;
+          border-bottom: 1px solid rgba(77, 245, 69, 0.18);
+        }
+        .row .lab {
+          opacity: 0.55;
+        }
+        .install {
+          position: absolute;
+          top: 360px;
+          right: 96px;
+          width: 860px;
+        }
+        .cmd {
+          font-family: monospace;
+          font-size: 16px;
+          padding: 16px 18px;
+          border: 2px solid #173d2a;
+          margin-bottom: 14px;
+          background: rgba(242, 239, 229, 0.95);
+          opacity: 0;
+        }
+        .cmd .lab {
+          display: block;
+          font-family: sans-serif;
+          font-weight: 600;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          font-size: 11px;
+          opacity: 0.55;
+          margin-bottom: 6px;
+        }
+        .foot {
+          position: absolute;
+          left: 96px;
+          right: 96px;
+          bottom: 110px;
+          display: flex;
+          justify-content: space-between;
+          font-family: monospace;
+          font-size: 14px;
+          letter-spacing: 0.04em;
+          border-top: 2px solid #173d2a;
+          padding-top: 16px;
+        }
+        .ok {
+          color: #1f6b1c;
+        }
+      </style>
+
+      <div id="root" data-composition-id="07-close" data-width="1920" data-height="1080" data-duration="5">
+        <div class="hairline top"></div>
+        <div class="hairline bottom"></div>
+        <div class="kicker">07 · CLOSE</div>
+        <div class="headline" id="c7-headline">One app. One contract.<br />Sixteen tools.</div>
+        <div class="app" id="c7-app">
+          <div class="app-name">Semantouch.app</div>
+          <div class="row"><span class="lab">bundle</span><span id="c7-bundle">—</span></div>
+          <div class="row"><span class="lab">team</span><span id="c7-team">—</span></div>
+          <div class="row"><span class="lab">version</span><span id="c7-ver">—</span></div>
+          <div class="row"><span class="lab">arch</span><span id="c7-arch">—</span></div>
+          <div class="row"><span class="lab">tools</span><span class="ok" id="c7-tools">—</span></div>
+        </div>
+        <div class="install" id="c7-install">
+          <div class="cmd" id="c7-cmd0"><span class="lab">omp</span><span class="body">—</span></div>
+          <div class="cmd" id="c7-cmd1"><span class="lab">npm</span><span class="body">—</span></div>
+          <div class="cmd" id="c7-cmd2"><span class="lab">homebrew</span><span class="body">—</span></div>
+        </div>
+        <div class="foot" id="c7-foot">
+          <div>github.com/watzon/semantouch</div>
+          <div id="c7-repro">REPRODUCE THIS RUN · node scripts/record-demo-evidence.mjs</div>
+        </div>
+      </div>
+
+      <script>
+        (function () {
+          const E = window.__SemantouchDemo;
+          const step = E.frameById("07-close");
+          const id = E.claim(step, "appIdentity");
+          const tools = E.claim(step, "toolCatalog");
+          const routes = E.claim(step, "installRoutes");
+          const repro = E.claim(step, "reproduce");
+          E.text(document.getElementById("c7-bundle"), id.bundleId);
+          E.text(document.getElementById("c7-team"), id.teamId);
+          E.text(document.getElementById("c7-ver"), "v" + id.version);
+          E.text(document.getElementById("c7-arch"), id.architecture);
+          E.text(document.getElementById("c7-tools"), tools.length + " · " + tools.slice(0, 4).join(", ") + "…");
+          routes.forEach((route, i) => {
+            const el = document.getElementById("c7-cmd" + i);
+            if (!el) return;
+            el.querySelector(".lab").textContent = route.label;
+            el.querySelector(".body").textContent = route.command;
+          });
+          E.text(document.getElementById("c7-repro"), "REPRODUCE · " + repro);
+
+          window.__timelines = window.__timelines || {};
+          const tl = gsap.timeline({ paused: true });
+          tl.fromTo("#c7-headline", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.55, ease: "power3.out" }, 0.1);
+          tl.fromTo("#c7-app .row", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.35, stagger: 0.08 }, 0.5);
+          tl.fromTo("#c7-cmd0", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35 }, 1.7);
+          tl.fromTo("#c7-cmd1", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35 }, 2.15);
+          tl.fromTo("#c7-cmd2", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35 }, 2.6);
+          tl.fromTo("#c7-foot", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 3.6);
+          window.__timelines["07-close"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>

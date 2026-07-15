@@ -1,6 +1,6 @@
 {
   "name": "semantouch",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Native macOS computer use through a local MCP server.",
   "author": {
     "name": "Watzon"
@@ -10,8 +10,11 @@
   "license": "MIT",
   "keywords": [
     "accessibility",
+    "ai-agents",
     "computer-use",
     "macos",
-    "mcp"
+    "macos-automation",
+    "mcp",
+    "screencapturekit"
   ]
 }

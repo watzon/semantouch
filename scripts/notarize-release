@@ -1,29 +1,79 @@
 #!/bin/sh
+# Notarize a signed Semantouch.app or signed DMG via notarytool.
+#
+# For an .app: packages a temporary zip, submits, then staples the app.
+# For a .dmg: submits the DMG directly, then staples the DMG.
+#
+# Credentials:
+#   Preferred: notarytool keychain profile (2nd arg, default notarytool-password)
+#   Or env: APPLE_NOTARY_APPLE_ID + APPLE_NOTARY_APP_SPECIFIC_PASSWORD + APPLE_NOTARY_TEAM_ID
 set -eu
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  printf '%s\n' "usage: $0 /path/to/semantouch [notarytool-keychain-profile]" >&2
+  printf '%s\n' "usage: $0 /path/to/Semantouch.app|/path/to/Semantouch.dmg [notarytool-keychain-profile]" >&2
   exit 2
 fi
 
-binary=$1
+target=$1
 profile=${2:-notarytool-password}
+
+die() {
+  printf '%s\n' "notarize-release: $*" >&2
+  exit 1
+}
+
+if [ ! -e "$target" ]; then
+  die "target not found: $target"
+fi
+
 temp_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-notary.XXXXXX")
 trap '/bin/rm -rf "$temp_dir"' EXIT HUP INT TERM
-archive="$temp_dir/semantouch.zip"
 result="$temp_dir/notarization.json"
 
-/usr/bin/ditto -c -k --keepParent "$binary" "$archive"
-/usr/bin/xcrun notarytool submit "$archive" \
-  --keychain-profile "$profile" \
-  --wait \
-  --output-format json > "$result"
+submit_with_credentials() {
+  archive=$1
+  if [ -n "${APPLE_NOTARY_APPLE_ID:-}" ] \
+    && [ -n "${APPLE_NOTARY_APP_SPECIFIC_PASSWORD:-}" ] \
+    && [ -n "${APPLE_NOTARY_TEAM_ID:-}" ]; then
+    if [ "${APPLE_NOTARY_TEAM_ID}" != "MB5789APU7" ]; then
+      die "APPLE_NOTARY_TEAM_ID must be MB5789APU7"
+    fi
+    /usr/bin/xcrun notarytool submit "$archive" \
+      --apple-id "$APPLE_NOTARY_APPLE_ID" \
+      --password "$APPLE_NOTARY_APP_SPECIFIC_PASSWORD" \
+      --team-id "$APPLE_NOTARY_TEAM_ID" \
+      --wait \
+      --output-format json > "$result"
+  else
+    /usr/bin/xcrun notarytool submit "$archive" \
+      --keychain-profile "$profile" \
+      --wait \
+      --output-format json > "$result"
+  fi
+}
+
+case $target in
+  *.dmg)
+    submit_with_credentials "$target"
+    ;;
+  *.app|*/Semantouch.app|Semantouch.app)
+    archive="$temp_dir/semantouch-app.zip"
+    /usr/bin/ditto -c -k --keepParent "$target" "$archive"
+    submit_with_credentials "$archive"
+    ;;
+  *)
+    die "unsupported target (expected .app or .dmg): $target"
+    ;;
+esac
 
 status=$(/usr/bin/plutil -extract status raw "$result")
 if [ "$status" != "Accepted" ]; then
   summary=$(/usr/bin/plutil -extract statusSummary raw "$result" 2>/dev/null || printf '%s' "Unknown notarization failure")
-  printf '%s\n' "semantouch: notarization failed: $status - $summary" >&2
-  exit 1
+  /bin/cat "$result" >&2 || true
+  die "notarization failed: $status - $summary"
 fi
 
-printf '%s\n' "semantouch: notarization accepted for $binary"
+/usr/bin/xcrun stapler staple "$target"
+/usr/bin/xcrun stapler validate "$target"
+
+printf '%s\n' "notarize-release: notarization accepted and stapled for $target"

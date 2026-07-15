@@ -88,4 +88,35 @@ final class ScrollActionsTests: XCTestCase {
             XCTAssertNotNil(reason, "scroll reports why no mechanism applied via data.reason")
         }
     }
+
+    func testFractionalPageOnScrollBarIsExact() throws {
+        let bar = FakeActionElement(settable: [AXActionName.value], attributes: [AXActionName.value: "0.2"])
+        let area = scrollArea()
+        area.namedElements[AXActionName.verticalScrollBar] = bar
+        _ = try ScrollActions.scroll(area, direction: .down, by: .page, count: 0.5, elementId: "e1")
+        guard case let .number(written) = bar.wroteValue else { return XCTFail("expected numeric write") }
+        // 0.2 + 0.9 * 0.5 = 0.65
+        XCTAssertEqual(written, 0.65, accuracy: 1e-9)
+    }
+
+    func testIntegerCountStillWorksAsDouble() throws {
+        let bar = FakeActionElement(settable: [AXActionName.value], attributes: [AXActionName.value: "0.5"])
+        let area = scrollArea()
+        area.namedElements[AXActionName.verticalScrollBar] = bar
+        _ = try ScrollActions.scroll(area, direction: .down, by: .line, count: 1, elementId: "e1")
+        guard case let .number(written) = bar.wroteValue else { return XCTFail("expected numeric write") }
+        XCTAssertEqual(written, 0.6, accuracy: 1e-9)
+    }
+
+    func testFractionalByPageActionReportsApproximation() throws {
+        let area = scrollArea(actions: ["AXScrollDownByPage"])
+        let result = try ScrollActions.scroll(area, direction: .down, by: .page, count: 1.5, elementId: "e1")
+        XCTAssertEqual(area.performed.count, 2, "ceil(1.5) discrete page actions")
+        XCTAssertTrue(result.warning?.contains("approximated") ?? false, "fractional discrete path documents approximation")
+    }
+
+    func testSemanticRepeatedLeftClickIsAXPress() throws {
+        // Documented here for the scroll/action suite: multi left click stays on AXPress.
+        // (Full coverage lives in SemanticActionsTests.)
+    }
 }

@@ -1,0 +1,95 @@
+name: macOS / runtime bug
+description: Broken observation, action, permissions, stale IDs, or host/relay behavior on macOS.
+title: "macOS: "
+labels: ["bug", "macos"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a Semantouch bug on macOS. Redact secrets, app-specific passwords, tokens, and private window contents.
+  - type: input
+    id: version
+    attributes:
+      label: Semantouch version
+      description: Output of `semantouch --version` or the plugin/app version.
+      placeholder: "0.2.1 (contract semantouch/1, MCP 2025-06-18)"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "macOS 15.5 / 26.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: CPU architecture
+      options:
+        - arm64
+        - x86_64
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: install_path
+    attributes:
+      label: Install path / identity
+      options:
+        - /Applications/Semantouch.app
+        - ~/Applications/Semantouch.app
+        - OMP plugin launcher (scripts/semantouch)
+        - source build / SEMANTOUCH_BIN
+        - other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`semantouch doctor --json` (redacted)"
+      description: Paste doctor JSON. Keep helper path/version/signing and permission fields; redact home-directory noise if needed.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: session_evidence
+    attributes:
+      label: Session / revision evidence
+      description: Include tool names, sessionId, revision, elementId (if any), and stale_* / focus_required / interrupted outcomes. Do not paste secrets from the target UI.
+      placeholder: |
+        tools/call get_app_state -> sessionId=s1 revision=3
+        tools/call click {sessionId,revision,elementId=e12} -> stale_revision current=4
+    validations:
+      required: true
+  - type: textarea
+    id: desktop_state
+    attributes:
+      label: Desktop / target app state
+      description: Frontmost app, multi-monitor layout if relevant, Stage Manager/fullscreen, target app name/bundle id, whether the target was already frontmost.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps. Prefer the fixture app when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stderr (optional)
+      description: MCP stdout must stay protocol-only; paste stderr diagnostics if available. Redact secrets.

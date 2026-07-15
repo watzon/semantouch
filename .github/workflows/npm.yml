@@ -1,0 +1,291 @@
+name: npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.2.1). Defaults to the triggering ref name."
+        required: false
+        type: string
+
+# Trusted publishing: OIDC identity to npmjs.com. No long-lived NPM_TOKEN.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish @watzon/semantouch
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: npm-publish
+    defaults:
+      run:
+        working-directory: npm/semantouch
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve immutable tag and package version
+        id: meta
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_TAG" ]]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          # Strict semver with optional pre-release / build metadata.
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag must be strict semver with v prefix (got: $TAG)" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+
+          # Every trigger, including manual dispatch, must use the exact immutable
+          # tag commit and that commit must be on approved main history.
+          git fetch origin main --tags --force
+          TAG_SHA="$(git rev-parse "refs/tags/$TAG^{commit}" 2>/dev/null || true)"
+          if [[ -z "$TAG_SHA" ]]; then
+            echo "could not resolve tag $TAG to a commit" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "tag $TAG ($TAG_SHA) is not on approved main history" >&2
+            exit 1
+          fi
+          git checkout --detach "$TAG_SHA"
+          if [[ "$(git rev-parse HEAD)" != "$TAG_SHA" ]]; then
+            echo "failed to check out exact tag commit $TAG_SHA" >&2
+            exit 1
+          fi
+
+          PACKAGE_VERSION="$(node -p "require('./npm/semantouch/package.json').version")"
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "npm package version $PACKAGE_VERSION does not match tag $TAG" >&2
+            exit 1
+          fi
+
+          ZIP_NAME="Semantouch-v${VERSION}-macos-universal2.zip"
+          CHECKSUM_NAME="${ZIP_NAME}.sha256"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$CHECKSUM_NAME" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION zip=$ZIP_NAME"
+
+      - name: Wait for canonical GitHub Release assets
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ steps.meta.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 900))
+          while (( SECONDS < deadline )); do
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              echo "release $TAG not visible yet; waiting..."
+              sleep 15
+              continue
+            fi
+
+            is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" == "true" ]]; then
+              echo "release $TAG is still a draft; waiting..."
+              sleep 15
+              continue
+            fi
+
+            assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+            if printf '%s\n' "$assets" | grep -Fx "$ZIP_NAME" >/dev/null \
+              && printf '%s\n' "$assets" | grep -Fx "$CHECKSUM_NAME" >/dev/null; then
+              echo "found required assets on $TAG:"
+              printf '%s\n' "$assets"
+              exit 0
+            fi
+
+            echo "release $TAG is published but missing $ZIP_NAME and/or $CHECKSUM_NAME; waiting..."
+            sleep 15
+          done
+
+          echo "timed out waiting for $ZIP_NAME and $CHECKSUM_NAME on release $TAG" >&2
+          gh release view "$TAG" --json assets --jq '.assets[].name' >&2 || true
+          exit 1
+
+      - name: Download ZIP+sidecar, hash, extract, verify, pin digest
+        id: pin
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ steps.meta.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d "${TMPDIR:-/tmp}/semantouch-npm-pin.XXXXXX")"
+          trap 'rm -rf "$tmp"' EXIT
+
+          # Download exact ZIP + sidecar bytes from the immutable release.
+          gh release download "$TAG" --pattern "$ZIP_NAME" --pattern "$CHECKSUM_NAME" --dir "$tmp"
+          test -f "$tmp/$ZIP_NAME"
+          test -f "$tmp/$CHECKSUM_NAME"
+
+          sidecar="$tmp/$CHECKSUM_NAME"
+          line_count="$(awk 'NF { c++ } END { print c+0 }' "$sidecar")"
+          if [[ "$line_count" != "1" ]]; then
+            echo "checksum sidecar must contain exactly one digest line" >&2
+            exit 1
+          fi
+          line="$(head -n 1 "$sidecar" | tr -d '\r')"
+          digest="${line%%  *}"
+          rest="${line#"$digest"}"
+          expected_suffix="  ${ZIP_NAME}"
+          if [[ ! "$digest" =~ ^[0-9a-f]{64}$ || "$rest" != "$expected_suffix" ]]; then
+            echo "checksum sidecar must be '<64 lowercase hex><two spaces>$ZIP_NAME'" >&2
+            echo "got: $line" >&2
+            exit 1
+          fi
+
+          actual="$(shasum -a 256 "$tmp/$ZIP_NAME" | awk '{ print $1 }')"
+          if [[ "$actual" != "$digest" ]]; then
+            echo "SHA-256 mismatch for $ZIP_NAME" >&2
+            echo "  expected: $digest" >&2
+            echo "  actual:   $actual" >&2
+            exit 1
+          fi
+
+          node -e '
+            const fs = require("node:fs");
+            const { preflightZipBuffer } = require("./npm/semantouch/lib/extract");
+            preflightZipBuffer(fs.readFileSync(process.argv[1]));
+          ' "$tmp/$ZIP_NAME"
+          # Extract and run full app verifier against the exact release bytes.
+          extract_dir="$tmp/extract"
+          mkdir -p "$extract_dir"
+          ditto -x -k "$tmp/$ZIP_NAME" "$extract_dir"
+          app_path="$extract_dir/Semantouch.app"
+          if [[ ! -d "$app_path" ]]; then
+            echo "extracted archive missing Semantouch.app" >&2
+            exit 1
+          fi
+
+          # Full contract: version, IDs, team, universal2, HR, timestamp, staple, Gatekeeper.
+          SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release "$app_path" "$VERSION"
+
+          # Pin verified digest into the package without changing semantic version.
+          pin_path="npm/semantouch/release-digest.json"
+          python3 -c 'import json,pathlib,sys; p,v,s,a=sys.argv[1:5]; pathlib.Path(p).write_text(json.dumps({"version":v,"sha256":s,"asset":a},indent=2)+"\n",encoding="utf-8")' \
+            "$pin_path" "$VERSION" "$actual" "$ZIP_NAME"
+
+          # Refuse accidental semver mutation.
+          pinned_version="$(node -p "require('./npm/semantouch/package.json').version")"
+          if [[ "$pinned_version" != "$VERSION" ]]; then
+            echo "package.json version mutated during pin ($pinned_version != $VERSION)" >&2
+            exit 1
+          fi
+          VERSION="$VERSION" ZIP_NAME="$ZIP_NAME" ACTUAL="$actual" node -e '
+            const pin = require("./npm/semantouch/release-digest.json");
+            if (pin.version !== process.env.VERSION) process.exit(1);
+            if (pin.sha256 !== process.env.ACTUAL) process.exit(1);
+            if (pin.asset !== process.env.ZIP_NAME) process.exit(1);
+          ' || {
+            echo "release-digest.json pin failed validation" >&2
+            exit 1
+          }
+
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
+          echo "pin_path=$pin_path" >> "$GITHUB_OUTPUT"
+          echo "Pinned $ZIP_NAME sha256=$actual into $pin_path"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install (no deps expected) and test
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          fi
+          # Ensure the pin file is present before pack/test.
+          test -f release-digest.json
+          npm test
+          npm pack --dry-run
+
+      - name: Assert pack contents include digest pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_out="$(npm pack --dry-run 2>&1)"
+          printf '%s\n' "$pack_out"
+
+          found_pin=0
+          while IFS= read -r line; do
+            case "$line" in
+              *"release-digest.json"*)
+                found_pin=1
+                ;;
+            esac
+            case "$line" in
+              *"npm notice"*"Tarball Contents"*|*"npm notice"*"Tarball Details"*|*"npm notice"*"Integrity"*|*"npm notice"*"package size"*|*"npm notice"*"unpacked size"*|*"npm notice"*"shasum"*|*"npm notice"*"filename"*|*"npm notice"*"total files"*|*"npm notice"*package.json*|*"npm notice"*README*|*"npm notice"*LICENSE*|*"npm notice"*bin/*|*"npm notice"*lib/*|*"npm notice"*release-digest.json*|*"npm notice"*"@watzon/semantouch"*|npm\ notice)
+                continue
+                ;;
+              *"npm notice"*)
+                path="$(printf '%s\n' "$line" | sed -n 's/^npm notice[[:space:]]*[0-9.]*[kKmMgGbB]*[[:space:]]*//p')"
+                if [[ -z "$path" ]]; then
+                  continue
+                fi
+                case "$path" in
+                  package.json|README.md|LICENSE|release-digest.json|bin/*|lib/*) ;;
+                  *)
+                    echo "unexpected pack path: $path" >&2
+                    exit 1
+                    ;;
+                esac
+                ;;
+            esac
+          done <<< "$pack_out"
+
+          if [[ "$found_pin" != "1" ]]; then
+            echo "npm pack must include release-digest.json pin" >&2
+            exit 1
+          fi
+
+      - name: Publish with OIDC provenance
+        run: |
+          set -euo pipefail
+          test -f release-digest.json
+          # Trusted publishing / provenance: no NPM_TOKEN secret.
+          # Requires the @watzon/semantouch package on npmjs.com to be configured
+          # for GitHub Actions OIDC trusted publishing from this repository + environment.
+          npm publish --access public --provenance

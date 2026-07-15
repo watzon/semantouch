@@ -1,0 +1,30 @@
+[package]
+name = "semantouch-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-facing Semantouch cross-platform runtime facade and MCP stdio server"
+publish = false
+
+[[bin]]
+name = "semantouch-runtime"
+path = "src/main.rs"
+
+[dependencies]
+semantouch-protocol = { workspace = true }
+semantouch-core = { workspace = true }
+semantouch-adapter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+semantouch-windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+semantouch-linux = { workspace = true }
+
+[dev-dependencies]
+semantouch-core = { workspace = true }
+semantouch-adapter = { workspace = true }

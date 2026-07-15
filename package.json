@@ -1,6 +1,6 @@
 {
   "name": "semantouch",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Semantouch native macOS computer-use MCP server and OMP integration.",
   "homepage": "https://github.com/watzon/semantouch",
@@ -25,5 +25,17 @@
     "LICENSE",
     "README.md"
   ],
+  "scripts": {
+    "test:agent-smoke": "node --test scripts/tests/agent-smoke-tests.mjs",
+    "agent-smoke": "node scripts/run-agent-smoke-tests.mjs",
+    "agent-smoke:dry-run": "node scripts/run-agent-smoke-tests.mjs --dry-run --json",
+    "agent-smoke:test": "node scripts/run-agent-smoke-tests.mjs",
+    "agent-smoke:stress": "node scripts/run-agent-stress.mjs",
+    "agent-smoke:permission": "node scripts/run-permission-onboarding-smoke.mjs",
+    "agent-stress": "node scripts/run-agent-stress.mjs",
+    "agent-stress:dry-run": "node scripts/run-agent-stress.mjs --dry-run --json",
+    "permission-onboarding": "node scripts/run-permission-onboarding-smoke.mjs",
+    "permission-onboarding:dry-run": "node scripts/run-permission-onboarding-smoke.mjs --dry-run --json"
+  },
   "omp": {}
 }

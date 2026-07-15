@@ -1,0 +1,23 @@
+[package]
+name = "semantouch-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux platform adapter (AT-SPI, X11, Wayland capability-gated portals)"
+publish = false
+
+[dependencies]
+semantouch-protocol = { workspace = true }
+semantouch-adapter = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = { version = "0.25", default-features = false, features = ["proxies-tokio", "tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "image"] }
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+enigo = { version = "0.3", default-features = false, features = ["x11rb"] }
+image = { workspace = true }

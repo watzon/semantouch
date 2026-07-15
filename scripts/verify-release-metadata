@@ -1,41 +1,129 @@
 #!/bin/sh
+# Verify release version/identity/architecture metadata consistency.
+# Accepts either the nested relay binary or a Semantouch.app bundle path.
 set -eu
 
 if [ "$#" -ne 1 ]; then
-  printf '%s\n' "usage: $0 /path/to/semantouch" >&2
+  printf '%s\n' "usage: $0 /path/to/semantouch|/path/to/Semantouch.app" >&2
   exit 2
 fi
 
-binary=$1
+target=$1
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+die() {
+  printf '%s\n' "verify-release-metadata: $*" >&2
+  exit 1
+}
+
+if [ -d "$target" ]; then
+  case $(basename -- "$target") in
+    Semantouch.app) ;;
+    *)
+      die "directory target must be Semantouch.app (got: $(basename -- "$target"))"
+      ;;
+  esac
+  binary="$target/Contents/MacOS/semantouch"
+else
+  binary=$target
+fi
+
+if [ ! -x "$binary" ]; then
+  die "relay binary not executable: $binary"
+fi
+
 generated_manifest=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/semantouch-manifest.XXXXXX")
 trap '/bin/rm -f "$generated_manifest"' EXIT HUP INT TERM
 "$binary" config --manifest \
   --path "/Applications/Semantouch.app/Contents/MacOS/semantouch" > "$generated_manifest"
 
-package_version=$(/usr/bin/plutil -extract version raw package.json)
-plugin_version=$(/usr/bin/plutil -extract version raw .claude-plugin/plugin.json)
-marketplace_version=$(/usr/bin/plutil -extract metadata.version raw .claude-plugin/marketplace.json)
-entry_version=$(/usr/bin/plutil -extract plugins.0.version raw .claude-plugin/marketplace.json)
+# Full semantic equality is the release contract. Selected-field checks can
+# silently ship a stale tool list, permission reason, TCC owner, or layout ID.
+/usr/bin/python3 -c '
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as checked, open(sys.argv[2], encoding="utf-8") as generated:
+    checked_value = json.load(checked)
+    generated_value = json.load(generated)
+if checked_value != generated_value:
+    checked_keys = set(checked_value)
+    generated_keys = set(generated_value)
+    missing = sorted(generated_keys - checked_keys)
+    extra = sorted(checked_keys - generated_keys)
+    changed = sorted(
+        key for key in checked_keys & generated_keys
+        if checked_value[key] != generated_value[key]
+    )
+    raise SystemExit(
+        f"checked-in plugin manifest drift: missing={missing!r} extra={extra!r} changed={changed!r}"
+    )
+' "$project_root/packaging/semantouch.plugin.json" "$generated_manifest" \
+  || die "checked-in plugin manifest does not match the production generator"
+
+package_version=$(/usr/bin/plutil -extract version raw "$project_root/package.json")
+plugin_version=$(/usr/bin/plutil -extract version raw "$project_root/.claude-plugin/plugin.json")
+marketplace_version=$(/usr/bin/plutil -extract metadata.version raw "$project_root/.claude-plugin/marketplace.json")
+entry_version=$(/usr/bin/plutil -extract plugins.0.version raw "$project_root/.claude-plugin/marketplace.json")
 binary_version=$("$binary" --version | /usr/bin/awk 'NR == 1 { print $2 }')
-packaging_version=$(/usr/bin/plutil -extract version raw packaging/semantouch.plugin.json)
-packaging_bundle_id=$(/usr/bin/plutil -extract bundleId raw packaging/semantouch.plugin.json)
-packaging_placeholder=$(/usr/bin/plutil -extract bundleIdIsPlaceholder raw packaging/semantouch.plugin.json)
+packaging_version=$(/usr/bin/plutil -extract version raw "$project_root/packaging/semantouch.plugin.json")
+packaging_bundle_id=$(/usr/bin/plutil -extract bundleId raw "$project_root/packaging/semantouch.plugin.json")
+packaging_placeholder=$(/usr/bin/plutil -extract bundleIdIsPlaceholder raw "$project_root/packaging/semantouch.plugin.json")
+packaging_min_os=$(/usr/bin/plutil -extract minimumMacOS raw "$project_root/packaging/semantouch.plugin.json")
 generated_bundle_id=$(/usr/bin/plutil -extract bundleId raw "$generated_manifest")
 generated_placeholder=$(/usr/bin/plutil -extract bundleIdIsPlaceholder raw "$generated_manifest")
+generated_min_os=$(/usr/bin/plutil -extract minimumMacOS raw "$generated_manifest")
 
 for candidate in "$plugin_version" "$marketplace_version" "$entry_version" "$packaging_version" "$binary_version"; do
   if [ "$candidate" != "$package_version" ]; then
-    printf '%s\n' \
-      "release version mismatch: package=$package_version plugin=$plugin_version marketplace=$marketplace_version entry=$entry_version packaging=$packaging_version binary=$binary_version" >&2
-    exit 1
+    die "release version mismatch: package=$package_version plugin=$plugin_version marketplace=$marketplace_version entry=$entry_version packaging=$packaging_version binary=$binary_version"
   fi
 done
 
 if [ "$packaging_bundle_id" != "$generated_bundle_id" ] \
   || [ "$packaging_placeholder" != "$generated_placeholder" ]; then
-  printf '%s\n' \
-    "release identity mismatch: packaging=$packaging_bundle_id/$packaging_placeholder generated=$generated_bundle_id/$generated_placeholder" >&2
-  exit 1
+  die "release identity mismatch: packaging=$packaging_bundle_id/$packaging_placeholder generated=$generated_bundle_id/$generated_placeholder"
 fi
 
-printf '%s\n' "release metadata matches semantouch $package_version"
+if [ "$packaging_min_os" != "14.0" ] || [ "$generated_min_os" != "14.0" ]; then
+  die "minimumMacOS must be 14.0 (packaging=$packaging_min_os generated=$generated_min_os)"
+fi
+
+# Architecture contract: both arm64 and x86_64, no extras.
+arch_json=$(/usr/bin/plutil -convert json -o - "$generated_manifest")
+printf '%s' "$arch_json" | /usr/bin/python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+arches = data.get("architectures")
+if arches != ["arm64", "x86_64"]:
+    raise SystemExit(f"architectures must be [arm64, x86_64], got: {arches!r}")
+' || die "generated manifest architectures are not [arm64, x86_64]"
+
+info_plist_template="$project_root/packaging/Semantouch.app/Info.plist"
+template_min_os=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$info_plist_template")
+if [ "$template_min_os" != "14.0" ]; then
+  die "Info.plist LSMinimumSystemVersion must be 14.0 (got: $template_min_os)"
+fi
+
+# When verifying an assembled app, enforce universal2 nested Mach-Os.
+if [ -d "$target" ]; then
+  host="$target/Contents/MacOS/SemantouchHost"
+  for path in "$host" "$binary"; do
+    archs=$(/usr/bin/lipo -archs "$path" 2>/dev/null || true)
+    normalized=$(printf '%s' "$archs" | /usr/bin/tr -s '[:space:]' ' ' | /usr/bin/sed 's/^ //;s/ $//')
+    has_arm64=0
+    has_x86_64=0
+    for arch in $normalized; do
+      case $arch in
+        arm64) has_arm64=1 ;;
+        x86_64) has_x86_64=1 ;;
+        *) die "unexpected arch slice $arch in $path" ;;
+      esac
+    done
+    if [ "$has_arm64" -ne 1 ] || [ "$has_x86_64" -ne 1 ]; then
+      die "nested binary is not universal2: $path ($normalized)"
+    fi
+  done
+fi
+
+printf '%s\n' "release metadata matches semantouch $package_version (macOS 14.0 universal2)"

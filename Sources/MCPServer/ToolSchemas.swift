@@ -37,6 +37,23 @@ public enum ToolSchemas {
             schema: objectSchema(required: [], properties: [:])
         ),
         Spec(
+            name: "launch_app",
+            description: "Explicitly launch an application or recover a hidden/minimized one, optionally activate it, and wait a bounded time for a capturable window. Ordinary app resolution never launches or recovers; only this tool does. Policy-gated before dispatch. Does not build an accessibility tree or attach SnapshotOptions.",
+            schema: objectSchema(
+                required: ["app"],
+                properties: [
+                    "app": ["type": "string"],
+                    "activate": ["type": "boolean", "default": true],
+                    "waitForWindowMs": [
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 3000,
+                        "description": "Milliseconds to wait for a capturable window after launch or recovery. Default 3000.",
+                    ],
+                ]
+            )
+        ),
+        Spec(
             name: "get_app_state",
             description: "Resolve an application and its target window, build a compact accessibility tree, and optionally capture a screenshot. Omit windowId or pass 0 on the first call to auto-select the best window. A positive windowId must be a WindowServer id returned as window.id by an earlier get_app_state response; list_apps.windows is only a count, never an id or index. Creates an app session if needed. Omit scopeElementId except to re-read a subtree using an element id from this session's immediately preceding snapshot.",
             schema: objectSchema(
@@ -65,6 +82,29 @@ public enum ToolSchemas {
                         "description": "Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.",
                     ],
                 ]
+            )
+        ),
+        Spec(
+            name: "read_text",
+            description: "Read the full live AXValue string of one revision-checked element without advancing the revision or rebuilding the accessibility tree. Use when a tree field is truncated at the 256-byte cap and you need the complete value. limit is a positive UTF-8 byte budget (default 4096) or the exact string \"max\". Rejects secure text fields. Truncation never splits an extended grapheme cluster.",
+            schema: objectSchema(
+                required: elementTargetRequired,
+                properties: merged(elementTargetProperties, [
+                    "limit": .object([
+                        "default": .int(4096),
+                        "description": "Positive UTF-8 byte budget, or the exact string \"max\" for the full value. Default 4096.",
+                        "oneOf": .array([
+                            .object([
+                                "type": "integer",
+                                "minimum": .int(1),
+                            ]),
+                            .object([
+                                "type": "string",
+                                "enum": .array([.string("max")]),
+                            ]),
+                        ]),
+                    ]),
+                ])
             )
         ),
         // MARK: v1.5 — read-only capture-only tool (§18.9)
@@ -98,69 +138,72 @@ public enum ToolSchemas {
         // Phase 4 coordinate fallback path (§16), dispatched on the presence of `at`.
         Spec(
             name: "click",
-            description: "Click the target. Preferred (semantic) form: pass an element (sessionId/revision/elementId) to invoke its primary AXPress. Fallback (coordinate) form: pass a point \"at\" (window points by default, or screenshot pixels) to synthesize a pointer click, subject to the interference policy.",
+            description: "Click the target. Preferred (semantic) form: pass an element (sessionId/revision/elementId) to invoke its primary AXPress (left button; clickCount 1…3 repeats AXPress). Right/middle element clicks deliver through the element's verified current frame under the interference policy. Fallback (coordinate) form: pass a point \"at\" (window points by default, or screenshot pixels) to synthesize a pointer click with optional button (left|right|middle) and clickCount (1…3). Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: ["app", "sessionId"],
-                properties: merged(elementTargetProperties, coordinateActionProperties)
+                properties: merged(merged(elementTargetProperties, coordinateActionProperties), snapshotOptionProperties)
             )
         ),
         Spec(
             name: "perform_action",
-            description: "Invoke a named accessibility action exposed by the target element.",
+            description: "Invoke a named accessibility action exposed by the target element. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: elementTargetRequired + ["action"],
-                properties: merged(elementTargetProperties, [
+                properties: merged(merged(elementTargetProperties, [
                     "action": ["type": "string"],
-                ])
+                ]), snapshotOptionProperties)
             )
         ),
         Spec(
             name: "set_value",
-            description: "Set the value (AXValue) of a settable element. With commit:true the server also focuses the element and runs its AXConfirm action when advertised (e.g. to submit/navigate a URL or search field); committed:false in the result means the value was written but not committed.",
+            description: "Set the value (AXValue) of a settable element. With commit:true the server also focuses the element and runs its AXConfirm action when advertised (e.g. to submit/navigate a URL or search field); committed:false in the result means the value was written but not committed. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: elementTargetRequired + ["value"],
-                properties: merged(elementTargetProperties, [
+                properties: merged(merged(elementTargetProperties, [
                     "value": ["type": ["string", "number", "boolean"]],
                     // v1.5 (§18.5): run the semantic commit path after the write.
                     "commit": ["type": "boolean", "default": false],
-                ])
+                ]), snapshotOptionProperties)
             )
         ),
         Spec(
             name: "select_text",
-            description: "Select a text range in the target element, or place the caret at start when length is zero.",
+            description: "Select a text range in the target element, or place the caret at start when length is zero. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: elementTargetRequired + ["start", "length"],
-                properties: merged(elementTargetProperties, [
+                properties: merged(merged(elementTargetProperties, [
                     "start": ["type": "integer", "minimum": 0],
                     "length": ["type": "integer", "minimum": 0],
-                ])
+                ]), snapshotOptionProperties)
             )
         ),
         Spec(
             name: "scroll",
-            description: "Scroll the target. Preferred (semantic) form: pass an element to scroll it by lines or pages. Fallback (coordinate) form: pass a point \"at\" to synthesize a scroll-wheel gesture there, subject to the interference policy.",
+            description: "Scroll the target. Preferred (semantic) form: pass an element to scroll it by lines or pages (count is a positive number; fractional page amounts are exact on settable scrollbar values and approximated for discrete AX page actions). Fallback (coordinate) form: pass a point \"at\" to synthesize a scroll-wheel gesture there, subject to the interference policy. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: ["app", "sessionId", "direction"],
-                properties: merged(merged(elementTargetProperties, [
+                properties: merged(merged(merged(elementTargetProperties, [
                     "direction": ["enum": ["up", "down", "left", "right"]],
                     "by": ["enum": ["line", "page"], "default": "line"],
-                    "count": ["type": "integer", "minimum": 1, "default": 1],
+                    // Positive magnitude; integers remain valid (type number accepts int).
+                    // exclusive lower bound is enforced by the handler (> 0) because the
+                    // schema validator only supports inclusive minimum.
+                    "count": ["type": "number", "minimum": 0, "default": 1],
                 ]), [
                     "at": pointSchema,
                     "space": spaceSchema,
                     "interference": interferenceSchema,
-                ])
+                ]), snapshotOptionProperties)
             )
         ),
 
         // MARK: Phase 4 — native fallback input (§16)
         Spec(
             name: "press_key",
-            description: "Send a keyboard shortcut or key sequence to the target. combo is space-separated chords of modifiers (cmd|ctrl|opt|shift|fn) plus a key token. Subject to the interference policy (default background-only requires the target to be frontmost). Optionally pass revision+elementId together to set accessibility focus on that element before the keys (e.g. \"enter\" in a URL field); the result then reports elementFocused.",
+            description: "Send a keyboard shortcut or key sequence to the target. combo is space-separated chords of modifiers (cmd|ctrl|opt|shift|fn) plus a key token. Subject to the interference policy (default background-only requires the target to be frontmost). Optionally pass revision+elementId together to set accessibility focus on that element before the keys (e.g. \"enter\" in a URL field); the result then reports elementFocused. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: ["app", "sessionId", "combo"],
-                properties: [
+                properties: merged([
                     "app": ["type": "string"],
                     "sessionId": sessionIdSchema,
                     "combo": ["type": "string"],
@@ -168,15 +211,15 @@ public enum ToolSchemas {
                     // v1.5 (§18.6): optional element-focus pair, valid only together.
                     "revision": ["type": "integer", "minimum": 1],
                     "elementId": elementIdSchema,
-                ]
+                ], snapshotOptionProperties)
             )
         ),
         Spec(
             name: "type_text",
-            description: "Type literal Unicode text into the target. Subject to the interference policy (default background-only requires the target to be frontmost). Optionally pass revision+elementId together to set accessibility focus on that element before typing; the result then reports elementFocused.",
+            description: "Type literal Unicode text into the target. Subject to the interference policy (default background-only requires the target to be frontmost). Optionally pass revision+elementId together to set accessibility focus on that element before typing; the result then reports elementFocused. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: ["app", "sessionId", "text"],
-                properties: [
+                properties: merged([
                     "app": ["type": "string"],
                     "sessionId": sessionIdSchema,
                     "text": ["type": "string"],
@@ -184,15 +227,15 @@ public enum ToolSchemas {
                     // v1.5 (§18.6): optional element-focus pair, valid only together.
                     "revision": ["type": "integer", "minimum": 1],
                     "elementId": elementIdSchema,
-                ]
+                ], snapshotOptionProperties)
             )
         ),
         Spec(
             name: "drag",
-            description: "Drag from one point to another in the target window's coordinate space (default) or screenshot pixels. Subject to the interference policy.",
+            description: "Drag from one point to another in the target window's coordinate space (default) or screenshot pixels. Subject to the interference policy. Optional observation fields cascade into a post-action state refresh.",
             schema: objectSchema(
                 required: ["app", "sessionId", "from", "to"],
-                properties: [
+                properties: merged([
                     "app": ["type": "string"],
                     "sessionId": sessionIdSchema,
                     "from": pointSchema,
@@ -201,7 +244,7 @@ public enum ToolSchemas {
                     "button": buttonSchema,
                     "modifiers": modifiersSchema,
                     "interference": interferenceSchema,
-                ]
+                ], snapshotOptionProperties)
             )
         ),
 
@@ -279,7 +322,15 @@ public enum ToolSchemas {
     private static let spaceSchema: JSONValue = ["enum": ["window", "screenshot"], "default": "window"]
 
     /// The pointer button for a coordinate click / drag.
-    private static let buttonSchema: JSONValue = ["enum": ["left", "right"], "default": "left"]
+    private static let buttonSchema: JSONValue = ["enum": ["left", "middle", "right"], "default": "left"]
+
+    /// Multi-click count for `click` (1 = single, 2 = double, 3 = triple). Default 1.
+    private static let clickCountSchema: JSONValue = [
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3,
+        "default": 1,
+    ]
 
     /// Held modifiers for a coordinate click / drag.
     private static let modifiersSchema: JSONValue = [
@@ -288,11 +339,13 @@ public enum ToolSchemas {
     ]
 
     /// The Phase 4 coordinate-fallback fields shared by `click` (§16): a target point,
-    /// its space, the pointer button, held modifiers, and the interference policy.
+    /// its space, the pointer button, multi-click count, held modifiers, and the
+    /// interference policy. `button`/`clickCount` also apply to the element form.
     private static let coordinateActionProperties: [String: JSONValue] = [
         "at": pointSchema,
         "space": spaceSchema,
         "button": buttonSchema,
+        "clickCount": clickCountSchema,
         "modifiers": modifiersSchema,
         "interference": interferenceSchema,
     ]
@@ -303,6 +356,30 @@ public enum ToolSchemas {
         "sessionId": sessionIdSchema,
         "revision": ["type": "integer", "minimum": 1],
         "elementId": elementIdSchema,
+    ]
+
+    /// Shared observation options accepted by every mutating tool and by `get_app_state`.
+    /// Cascaded into post-action refresh; defaults match `get_app_state`.
+    private static let snapshotOptionProperties: [String: JSONValue] = [
+        "windowId": [
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.",
+        ],
+        "forceFullTree": ["type": "boolean", "default": false],
+        "disableDiff": ["type": "boolean", "default": false],
+        "includeScreenshot": ["enum": ["auto", "always", "never"], "default": "auto"],
+        "scopeElementId": [
+            "type": "string",
+            "pattern": "^e[0-9]+$",
+            "description": "Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.",
+        ],
+        "maxNodes": [
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "description": "Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.",
+        ],
     ]
 
     /// `ElementTarget` required keys, in a stable order.

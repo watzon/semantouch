@@ -10,8 +10,9 @@ import CoreGraphics
 // update, and hide the overlay and WHERE to place it, driving the pure `CursorPlan`
 // geometry into a `CursorPresenting` seam and a `CursorAnimating` seam. All AppKit lives
 // behind `CursorPresenting` (see CursorPanel.swift), so every lifecycle branch —
-// show-on-action, follow-window-move, hide-on-interrupt/end, honour the hide/dim
-// preference — is unit-testable against a fake presenter with no windows and no GUI.
+// show-on-action, follow-window-move, drop-to-idle-on-finish with 30 s idle cleanup,
+// hide-on-endTurn/endSession/shutdown, honour the hide/dim preference — is unit-testable
+// against a fake presenter with no windows and no GUI.
 //
 // Best-effort by construction: every method is non-throwing and returns promptly.
 // The overlay failing, or there being no GUI session at all, NEVER fails or delays an action.
@@ -94,13 +95,68 @@ public enum CursorPreference: String, Sendable, Equatable {
     }
 }
 
+// MARK: - Idle cleanup scheduler
+
+/// Cancels a previously scheduled idle-cleanup callback.
+public protocol CursorIdleCleanupCancelling: AnyObject {
+    func cancel()
+}
+
+/// Injectable delay scheduler for the controller's idle cleanup.
+///
+/// Production uses `DispatchCursorIdleCleanupScheduler`. Tests inject a fake so lifecycle
+/// goldens never depend on the wall clock. The scheduled work MUST be nonblocking and MUST
+/// NOT gate action execution.
+public protocol CursorIdleCleanupScheduling: AnyObject {
+    /// Schedule `work` after `delay` seconds. Returns a token that cancels the work if it
+    /// is still pending. `work` may run on any queue and MUST return promptly.
+    func schedule(
+        after delay: TimeInterval,
+        execute work: @escaping @Sendable () -> Void
+    ) -> any CursorIdleCleanupCancelling
+}
+
+/// Production idle-cleanup scheduler backed by `DispatchQueue.asyncAfter`.
+public final class DispatchCursorIdleCleanupScheduler: CursorIdleCleanupScheduling, @unchecked Sendable {
+    private let queue: DispatchQueue
+
+    public init(queue: DispatchQueue = .global(qos: .utility)) {
+        self.queue = queue
+    }
+
+    public func schedule(
+        after delay: TimeInterval,
+        execute work: @escaping @Sendable () -> Void
+    ) -> any CursorIdleCleanupCancelling {
+        let item = DispatchWorkItem(block: work)
+        queue.asyncAfter(deadline: .now() + max(delay, 0), execute: item)
+        return DispatchCursorIdleCleanupToken(item: item)
+    }
+}
+
+private final class DispatchCursorIdleCleanupToken: CursorIdleCleanupCancelling, @unchecked Sendable {
+    private let item: DispatchWorkItem
+    init(item: DispatchWorkItem) { self.item = item }
+    func cancel() { item.cancel() }
+}
+
 // MARK: - Controller
 
 /// Owns the overlay lifecycle across the helper process. One overlay cursor is shown at a
 /// time (the most recently acting session); it is best-effort and decorative.
+///
+/// After an action finishes the cursor stays visible at its last point and a 30-second idle
+/// cleanup is armed. Reflect/note activity cancels or reschedules that cleanup; explicit
+/// teardown (`endTurn` / `endSession` / `shutdown`) hides immediately. Stale timers never
+/// hide a newer owner.
 public final class CursorController: @unchecked Sendable {
+    /// Default idle-hide delay after `finish` when no further overlay activity occurs.
+    public static let defaultIdleCleanupTimeout: TimeInterval = 30
+
     private let presenter: CursorPresenting
     private let animator: CursorAnimating
+    private let idleCleanupScheduler: CursorIdleCleanupScheduling
+    private let idleCleanupTimeout: TimeInterval
     public let preference: CursorPreference
 
     private let lock = NSLock()
@@ -118,15 +174,24 @@ public final class CursorController: @unchecked Sendable {
     /// The last applied plan for the active session (used to follow window moves and to
     /// drop to idle without recomputing the cursor point).
     private var lastPlan: CursorPlan?
+    /// Pending idle-hide work for the currently visible idle cursor, if any.
+    private var pendingIdleCleanup: (any CursorIdleCleanupCancelling)?
+    /// Bumped on every cancel/schedule/teardown so a stale cleanup callback cannot hide a
+    /// newer owner after a session switch or reschedule.
+    private var idleCleanupGeneration: UInt64 = 0
 
     public init(
         presenter: CursorPresenting,
         animator: CursorAnimating = CursorAnimator(),
-        preference: CursorPreference = .fromEnvironment()
+        preference: CursorPreference = .fromEnvironment(),
+        idleCleanupScheduler: CursorIdleCleanupScheduling = DispatchCursorIdleCleanupScheduler(),
+        idleCleanupTimeout: TimeInterval = CursorController.defaultIdleCleanupTimeout
     ) {
         self.presenter = presenter
         self.animator = animator
         self.preference = preference
+        self.idleCleanupScheduler = idleCleanupScheduler
+        self.idleCleanupTimeout = idleCleanupTimeout
     }
 
     /// Whether the overlay may present at all: enabled by preference AND a GUI session is
@@ -152,6 +217,12 @@ public final class CursorController: @unchecked Sendable {
             progress: previous.progressForReposition
         )
         apply(plan)
+        // Window-follow is activity: reschedule idle cleanup while resting, otherwise cancel.
+        if case .idle = plan.visualState {
+            scheduleIdleCleanupLocked()
+        } else {
+            cancelIdleCleanupLocked()
+        }
     }
 
     /// Reflect one action for a session and place the cursor at `targetPointWindow` (window
@@ -163,7 +234,8 @@ public final class CursorController: @unchecked Sendable {
     /// `type_text`/`press_key`, and non-pointer semantics) passes `pointerKind: false` and
     /// reflects NOTHING until the session has already been activated by a pointer action;
     /// thereafter it updates the cursor like any other action. Once shown, the overlay
-    /// PERSISTS (idle between actions) — see `finish` — until an explicit teardown.
+    /// PERSISTS (idle between actions) — see `finish` — until idle cleanup expires or an
+    /// explicit teardown runs. Reflect cancels any pending idle cleanup (activity).
     public func reflect(
         sessionId: String,
         windowFrame: Rect,
@@ -183,6 +255,10 @@ public final class CursorController: @unchecked Sendable {
         } else if !activatedSessions.contains(sessionId) {
             return
         }
+
+        // Action activity: cancel any armed idle hide so a prior finish cannot drop the
+        // cursor mid-action (or after a session switch reuses the overlay).
+        cancelIdleCleanupLocked()
 
         // A location-less action (keyboard progress, a semantic action whose element frame
         // was not resolvable) must not YANK an already-visible cursor to the window centre —
@@ -218,10 +294,11 @@ public final class CursorController: @unchecked Sendable {
     }
 
     /// An action finished. The overlay does NOT hide on per-action completion (task step 1):
-    /// it drops the cursor to an IDLE-but-VISIBLE state, resting at its last point until the
-    /// next action. A user-interruption ALSO stays visible — the cursor simply goes idle;
-    /// only an explicit teardown (`endSession`/`shutdown`) removes the overlay. `interrupted`
-    /// is retained for a possible future paused visual, but both paths currently go idle.
+    /// it drops the cursor to an IDLE-but-VISIBLE state, resting at its last point, and arms
+    /// the idle-cleanup timer. A user-interruption ALSO stays visible — the cursor simply
+    /// goes idle and schedules the same cleanup. Explicit teardown (`endTurn` / `endSession`
+    /// / `shutdown`) removes the overlay immediately. `interrupted` is retained for a
+    /// possible future paused visual, but both paths currently go idle.
     public func finish(sessionId: String, interrupted: Bool) {
         lock.lock(); defer { lock.unlock() }
         guard enabled, activeSession == sessionId else { return }
@@ -232,11 +309,13 @@ public final class CursorController: @unchecked Sendable {
             targetPointWindow: previous.cursorInPanel
         )
         apply(plan)
+        scheduleIdleCleanupLocked()
     }
 
     /// A single app session ended — an explicit teardown entrypoint (task step 1), wired to
-    /// `end_app_session`. Hides the overlay if this session owns it, forgets the session's
-    /// geometry, and DISARMS its first-show activation. Idempotent for an unknown session.
+    /// `end_app_session`. Hides the overlay if this session owns it, cancels pending idle
+    /// cleanup, forgets the session's geometry, and DISARMS its first-show activation.
+    /// Idempotent for an unknown session.
     public func endSession(sessionId: String) {
         lock.lock(); defer { lock.unlock() }
         windowFrames.removeValue(forKey: sessionId)
@@ -245,15 +324,39 @@ public final class CursorController: @unchecked Sendable {
         hideLocked()
     }
 
+    /// Agent turn boundary (`notifications/turn-ended`): hide the currently presented
+    /// decorative cursor, cancel pending idle cleanup, and DISARM first-show arming for
+    /// every session, without ending app sessions, clearing stored window geometry, or
+    /// touching session/element state. Inert when disabled/headless — the presenter is
+    /// never called in those modes.
+    public func endTurn() {
+        lock.lock(); defer { lock.unlock() }
+        // Hide only when something is currently presented; never touch the presenter when
+        // disabled/headless (`enabled` is false) or when no overlay is active.
+        if enabled, activeSession != nil {
+            hideLocked()
+        } else {
+            cancelIdleCleanupLocked()
+        }
+        activatedSessions.removeAll()
+        // Deliberately keep `windowFrames`: turn end is decorative only; a later action
+        // may re-show against the same stored geometry without re-noting the window.
+    }
+
     /// Full overlay teardown (task step 1): the connection/session is shutting down — MCP
-    /// connection close (stdin EOF) or server shutdown (SIGTERM). Hides the overlay and
-    /// forgets ALL per-session state. Exposed now and called from the `mcp` runtime's
-    /// EOF/SIGTERM paths; inert (safe) when nothing was ever shown or when disabled/headless.
+    /// connection close (stdin EOF) or server shutdown (SIGTERM). Hides the overlay,
+    /// cancels pending idle cleanup, and forgets ALL per-session state. Exposed now and
+    /// called from the `mcp` runtime's EOF/SIGTERM paths; inert (safe) when nothing was
+    /// ever shown or when disabled/headless.
     public func shutdown() {
         lock.lock(); defer { lock.unlock() }
         // Only touch the presenter when the overlay could ever have shown — keeps the
         // `off`/headless contract fully inert (no AppKit call ever).
-        if enabled { hideLocked() }
+        if enabled {
+            hideLocked()
+        } else {
+            cancelIdleCleanupLocked()
+        }
         activatedSessions.removeAll()
         windowFrames.removeAll()
     }
@@ -281,10 +384,39 @@ public final class CursorController: @unchecked Sendable {
     }
 
     private func hideLocked() {
+        cancelIdleCleanupLocked()
         presenter.hide()
         animator.stop()
         activeSession = nil
         lastPlan = nil
+    }
+
+    /// Cancel any armed idle cleanup and invalidate in-flight callbacks via generation bump.
+    private func cancelIdleCleanupLocked() {
+        pendingIdleCleanup?.cancel()
+        pendingIdleCleanup = nil
+        idleCleanupGeneration &+= 1
+    }
+
+    /// Arm a fresh idle-hide for the current owner. Cancels any previous timer first so a
+    /// session switch or reschedule cannot leave two live cleanups.
+    private func scheduleIdleCleanupLocked() {
+        cancelIdleCleanupLocked()
+        guard enabled, let sessionId = activeSession else { return }
+        let generation = idleCleanupGeneration
+        let timeout = idleCleanupTimeout
+        pendingIdleCleanup = idleCleanupScheduler.schedule(after: timeout) { [weak self] in
+            self?.handleIdleCleanup(expectedGeneration: generation, expectedSession: sessionId)
+        }
+    }
+
+    /// Timer callback: hide only when this generation still owns the overlay.
+    private func handleIdleCleanup(expectedGeneration: UInt64, expectedSession: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard enabled else { return }
+        guard idleCleanupGeneration == expectedGeneration else { return }
+        guard activeSession == expectedSession else { return }
+        hideLocked()
     }
 }
 

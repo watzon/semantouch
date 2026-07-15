@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Native macOS computer use plugins.",
-    "version": "0.2.1"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "semantouch",
       "description": "Native macOS computer use through a local MCP server.",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "source": "./",
       "category": "development",
       "homepage": "https://github.com/watzon/semantouch",
@@ -20,9 +20,12 @@
       "license": "MIT",
       "keywords": [
         "accessibility",
+        "ai-agents",
         "computer-use",
         "macos",
-        "mcp"
+        "macos-automation",
+        "mcp",
+        "screencapturekit"
       ]
     }
   ]

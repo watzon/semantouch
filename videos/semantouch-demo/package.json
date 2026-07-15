@@ -1,0 +1,21 @@
+{
+  "name": "semantouch-demo",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "evidence": "node ../../scripts/record-demo-evidence.mjs",
+    "evidence:check": "node ../../scripts/record-demo-evidence.mjs --check",
+    "evidence:live": "node ../../scripts/record-demo-evidence.mjs --live",
+    "dev": "hyperframes preview",
+    "lint": "hyperframes lint",
+    "check": "npm run evidence:check && hyperframes check",
+    "render": "hyperframes render",
+    "publish": "hyperframes publish"
+  },
+  "devDependencies": {
+    "hyperframes": "0.7.58"
+  }
+}

@@ -17,6 +17,11 @@ import ComputerUseCore
 // deterministic and unit-testable. The live AppKit presenter performs its own on-screen
 // interpolation via Core Animation; this model is the tested reference and the seam the
 // controller drives.
+//
+// Motion: heading-aware trajectory planning (direct/turn/brake/orbit) plus a fixed-step
+// critically-damped spring that tracks the planned path. Results are near frame-rate
+// independent and settle without unbounded oscillation. Endpoints stay exact within
+// the configured epsilon.
 
 // MARK: - Frame
 
@@ -71,7 +76,8 @@ public protocol CursorAnimating: AnyObject {
 /// cursor "flying" to its target and settling upright; the presenter can pass custom values
 /// and tests pin the math against explicit ones.
 public struct CursorMotionConfig: Equatable, Sendable {
-    /// Per-second exponential approach rate for the tip position. Higher = snappier.
+    /// Per-second approach rate kept for public API compatibility. When
+    /// `springStiffness` is `0`, stiffness is derived as `positionRate²`.
     public var positionRate: Double
     /// Distance (panel points) under which the tip counts as settled.
     public var epsilon: Double
@@ -100,6 +106,16 @@ public struct CursorMotionConfig: Equatable, Sendable {
     public var rippleMaxRadius: Double
     /// Click-ripple starting opacity (fades to 0).
     public var rippleStartAlpha: Double
+    /// Fixed integration step in seconds for the damped spring (frame-rate independence).
+    public var fixedStep: Double
+    /// Spring stiffness (ω²). `0` means derive from `positionRate` (`≈ rate²`).
+    public var springStiffness: Double
+    /// Spring damping coefficient. `0` selects the default overdamped coefficient (`2.4 · √stiffness`).
+    public var springDamping: Double
+    /// Nominal path-progress duration (seconds) for a typical travel distance.
+    public var travelDuration: Double
+    /// Number of discrete samples when planning a trajectory (clamped by the planner).
+    public var trajectorySamples: Int
 
     public init(
         positionRate: Double = 12.0,
@@ -115,7 +131,12 @@ public struct CursorMotionConfig: Equatable, Sendable {
         velocitySmoothing: Double = 0.35,
         rippleDuration: Double = 0.45,
         rippleMaxRadius: Double = 26.0,
-        rippleStartAlpha: Double = 0.42
+        rippleStartAlpha: Double = 0.42,
+        fixedStep: Double = 1.0 / 240.0,
+        springStiffness: Double = 0,
+        springDamping: Double = 0,
+        travelDuration: Double = 0.55,
+        trajectorySamples: Int = 24
     ) {
         self.positionRate = positionRate
         self.epsilon = epsilon
@@ -131,16 +152,43 @@ public struct CursorMotionConfig: Equatable, Sendable {
         self.rippleDuration = rippleDuration
         self.rippleMaxRadius = rippleMaxRadius
         self.rippleStartAlpha = rippleStartAlpha
+        self.fixedStep = fixedStep
+        self.springStiffness = springStiffness
+        self.springDamping = springDamping
+        self.travelDuration = travelDuration
+        self.trajectorySamples = trajectorySamples
     }
 
     public static let `default` = CursorMotionConfig()
+
+    /// Resolved spring stiffness (ω²).
+    var resolvedStiffness: Double {
+        if springStiffness > 0, springStiffness.isFinite { return springStiffness }
+        let r = positionRate.isFinite && positionRate > 0 ? positionRate : 12.0
+        // Slightly stiffer than rate² so the tip stays tight on the path sample.
+        return r * r * 1.6
+    }
+
+    /// Resolved damping coefficient. Default is overdamped (`2.4 · √stiffness`) so the
+    /// tip tracks the path sample without free oscillation or endpoint overshoot.
+    var resolvedDamping: Double {
+        if springDamping > 0, springDamping.isFinite { return springDamping }
+        return 2.4 * resolvedStiffness.squareRoot()
+    }
+
+    /// Clamped fixed step used by the integrator.
+    var resolvedFixedStep: Double {
+        let h = fixedStep
+        guard h.isFinite, h > 0 else { return 1.0 / 240.0 }
+        return min(max(h, 1.0 / 1000.0), 1.0 / 30.0)
+    }
 }
 
-/// The deterministic motion model. Eases the drawn tip toward the target with an
-/// exponential approach, derives a lifelike pose (lean / skew / stretch) from the tip's
-/// velocity, squashes on a held press, and ages click ripples. Pure given its internal
-/// state — no clock, no AppKit — so `tickRender(dt:)` is fully unit-testable and the live
-/// presenter renders exactly what the model emits.
+/// The deterministic motion model. Tracks a heading-aware planned path with a
+/// fixed-step damped spring, derives a lifelike pose (lean / skew / stretch) from the
+/// tip's velocity, squashes on a held press, and ages click ripples. Pure given its
+/// internal state — no clock, no AppKit — so `tickRender(dt:)` is fully unit-testable
+/// and the live presenter renders exactly what the model emits.
 public final class CursorAnimator: CursorAnimating {
     public private(set) var identityColor: CursorColor?
 
@@ -151,6 +199,8 @@ public final class CursorAnimator: CursorAnimating {
     private var state: CursorVisualState = .idle
     /// Smoothed velocity in points/second (drives lean/skew/stretch).
     private var velocity = Point(x: 0, y: 0)
+    /// Integrator velocity (points/second) for the tracking spring.
+    private var tipVelocity = Point(x: 0, y: 0)
     /// Current eased pose deviations (toward velocity-derived targets).
     private var angle = 0.0
     private var skew = 0.0
@@ -164,9 +214,24 @@ public final class CursorAnimator: CursorAnimating {
     private var pendingPress = false
     private var pendingPressTarget = Point(x: 0, y: 0)
 
+    /// Active planned path (retarget allocates a small value).
+    private var trajectory: CursorTrajectory?
+    /// Progress along the active trajectory, 0…1.
+    private var pathProgress = 1.0
+    /// Residual time not yet consumed by a full fixed step (for determinism across dt partitions).
+    private var timeAccumulator = 0.0
+    /// Heading used for the next plan (updated from travel / trajectory end).
+    private var motionHeading = 0.0
+
     /// How many times `synchronize()` has been called (diagnostic; proves the sync point
     /// is exercised without ever blocking).
     public private(set) var synchronizeCount = 0
+
+    /// The path kind of the active (or most recent) trajectory, for diagnostics/tests.
+    public var activePathKind: CursorPathKind? { trajectory?.kind }
+
+    /// Current motion heading in radians (`atan2(dy, dx)`), for diagnostics/tests.
+    public var currentHeading: Double { motionHeading }
 
     public init(config: CursorMotionConfig = .default) {
         self.config = config
@@ -179,36 +244,49 @@ public final class CursorAnimator: CursorAnimating {
     }
 
     public var isSettled: Bool {
-        abs(position.x - target.x) <= config.epsilon && abs(position.y - target.y) <= config.epsilon
+        abs(position.x - target.x) <= config.epsilon
+            && abs(position.y - target.y) <= config.epsilon
+            && pathProgress >= 1.0 - 1e-9
+            && tipSpeed() <= max(config.epsilon * 40, 8)
     }
 
     public func reset(color: CursorColor, at position: Point) {
         identityColor = color
-        self.position = position
-        target = position
+        let p = finitePoint(position, fallback: Point(x: 0, y: 0))
+        self.position = p
+        target = p
         state = .idle
         velocity = Point(x: 0, y: 0)
+        tipVelocity = Point(x: 0, y: 0)
         angle = 0; skew = 0; scale = 1
         ripples.removeAll()
         pendingPress = false
+        trajectory = nil
+        pathProgress = 1.0
+        timeAccumulator = 0
+        motionHeading = 0
     }
 
     public func retarget(to target: Point, state: CursorVisualState) {
+        let next = finitePoint(target, fallback: self.target)
+
         if isPressed(state), !isPressed(self.state) {
             // Transition INTO a press: DEFER the ripple until the tip reaches this target, so
             // the bubble blooms under the click destination rather than at the point the
             // cursor is flying away from. Fires in `advance` on arrival.
             pendingPress = true
-            pendingPressTarget = target
-        } else if pendingPress, !within(target, pendingPressTarget, config.epsilon) {
+            pendingPressTarget = next
+        } else if pendingPress, !within(next, pendingPressTarget, config.epsilon) {
             // A new action redirected the cursor elsewhere before the deferred click landed:
             // emit the ripple at its INTENDED location now rather than dropping it or letting
             // it bloom at the wrong place.
             ripples.append((center: pendingPressTarget, age: 0))
             pendingPress = false
         }
-        self.target = target
+
+        self.target = next
         self.state = state
+        planTrajectory(to: next)
     }
 
     /// Explicitly spawn a click ripple at the current tip (an escape hatch for a press
@@ -220,45 +298,251 @@ public final class CursorAnimator: CursorAnimating {
     /// Advance position, velocity, pose, and ripples by `dt` seconds. Shared by `tick` and
     /// `tickRender`; call exactly one of those per frame.
     private func advance(dt: Double) {
-        guard dt > 0 else { return }
-        // Exponential approach: fraction closed this step = 1 - e^(-rate·dt).
-        let step = clamp01(1 - exp(-config.positionRate * dt))
+        // Non-finite or non-positive dt does not advance motion. Oversized dt is capped
+        // so a stalled host frame cannot explode the integrator.
+        guard dt.isFinite, dt > 0 else { return }
+        let clampedDt = min(dt, 0.25)
+
         let previous = position
-        position = Point(
-            x: position.x + (target.x - position.x) * step,
-            y: position.y + (target.y - position.y) * step
+        integrate(dt: clampedDt)
+
+        // Instantaneous tip velocity from actual displacement (drives lean/skew/stretch).
+        let inv = 1.0 / clampedDt
+        let instant = Point(
+            x: (position.x - previous.x) * inv,
+            y: (position.y - previous.y) * inv
         )
-        // Instantaneous velocity, low-pass smoothed so lean/skew don't jitter.
-        let instant = Point(x: (position.x - previous.x) / dt, y: (position.y - previous.y) / dt)
         let s = clamp01(config.velocitySmoothing)
         velocity = Point(
             x: velocity.x + (instant.x - velocity.x) * s,
             y: velocity.y + (instant.y - velocity.y) * s
         )
+        if !velocity.x.isFinite { velocity.x = 0 }
+        if !velocity.y.isFinite { velocity.y = 0 }
 
-        // Velocity-derived pose targets. Lean and skew follow horizontal velocity (the arrow
-        // banks into its travel); a small stretch follows overall speed. A held press squashes.
+        updatePose(dt: clampedDt)
+        ageRipples(dt: clampedDt)
+    }
+
+    private func planTrajectory(to end: Point) {
+        let start = position
+        let path = CursorTrajectory.plan(
+            from: start,
+            to: end,
+            heading: motionHeading,
+            sampleCount: config.trajectorySamples,
+            epsilon: config.epsilon
+        )
+        trajectory = path
+        pathProgress = 0
+
+        // Soft-cap runaway integrator velocity on retarget; preserve heading continuity
+        // by keeping a bounded residual speed rather than zeroing hard.
+        let speed = tipSpeed()
+        if speed > 6000 {
+            let scale = 6000 / speed
+            tipVelocity = Point(x: tipVelocity.x * scale, y: tipVelocity.y * scale)
+        }
+
+        // Zero-length: already there.
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let dist = (dx * dx + dy * dy).squareRoot()
+        if dist <= config.epsilon {
+            pathProgress = 1
+            position = end
+            tipVelocity = Point(x: 0, y: 0)
+            velocity = Point(x: 0, y: 0)
+            return
+        }
+
+        // Modest feed-forward along the first segment so lean/skew read early and
+        // mid-flight retargets keep heading continuity without flinging past the path.
+        if path.samples.count >= 2 {
+            let a = path.samples[0]
+            let b = path.samples[1]
+            let sdx = b.x - a.x
+            let sdy = b.y - a.y
+            let seg = (sdx * sdx + sdy * sdy).squareRoot()
+            if seg > 1e-9 {
+                let duration = max(config.travelDuration, 0.1)
+                let push = min(max(dist / duration * 0.40, 90), 900)
+                let ux = sdx / seg
+                let uy = sdy / seg
+                tipVelocity = Point(
+                    x: tipVelocity.x * 0.45 + ux * push * 0.55,
+                    y: tipVelocity.y * 0.45 + uy * push * 0.55
+                )
+            }
+        }
+    }
+
+    /// Fixed-step overdamped spring tracking the moving path sample.
+    ///
+    /// State: tip position `p`, tip velocity `v`.
+    /// Desired: `d = path.point(at: progress)`.
+    /// Semi-implicit Euler:
+    ///   a = k·(d − p) − c·v
+    ///   v += a·h
+    ///   p += v·h
+    private func integrate(dt: Double) {
+        let h = config.resolvedFixedStep
+        timeAccumulator += dt
+        if timeAccumulator > 0.5 { timeAccumulator = 0.5 }
+
+        let k = config.resolvedStiffness
+        let c = config.resolvedDamping
+        let progressRate = pathProgressRate()
+
+        var steps = 0
+        let maxSteps = 512
+        while timeAccumulator >= h, steps < maxSteps {
+            timeAccumulator -= h
+            steps += 1
+
+            if pathProgress < 1 {
+                let remain = 1 - pathProgress
+                let step = 1 - exp(-progressRate * h)
+                pathProgress = min(1, pathProgress + remain * step)
+                if pathProgress > 1 - 1e-6 { pathProgress = 1 }
+            }
+
+            let desired = pathSample(at: pathProgress)
+            var px = position.x
+            var py = position.y
+            var vx = tipVelocity.x
+            var vy = tipVelocity.y
+
+            if pathProgress >= 1 {
+                // Path complete: exponential approach to the exact endpoint.
+                // Guarantees no overshoot past the target and exact settling, while the
+                // mid-path spring still carries the curved heading feel.
+                let settle = clamp01(1 - exp(-config.positionRate * h))
+                let rate = max(config.positionRate, 1)
+                px += (desired.x - px) * settle
+                py += (desired.y - py) * settle
+                // Velocity consistent with the exponential step (for pose lean).
+                vx = (desired.x - px) * rate
+                vy = (desired.y - py) * rate
+            } else {
+                let ax = k * (desired.x - px) - c * vx
+                let ay = k * (desired.y - py) - c * vy
+                vx += ax * h
+                vy += ay * h
+
+                // Contain non-finite / runaway velocities.
+                if !vx.isFinite || abs(vx) > 50_000 { vx = 0 }
+                if !vy.isFinite || abs(vy) > 50_000 { vy = 0 }
+
+                px += vx * h
+                py += vy * h
+            }
+
+            if !px.isFinite { px = desired.x }
+            if !py.isFinite { py = desired.y }
+            if !vx.isFinite { vx = 0 }
+            if !vy.isFinite { vy = 0 }
+
+            // Direct paths stay inside the start→end axis-aligned box so a stiff
+            // tracking step cannot overshoot the endpoint (existing settle contract).
+            if let path = trajectory, path.kind == .direct {
+                let minX = min(path.start.x, path.end.x)
+                let maxX = max(path.start.x, path.end.x)
+                let minY = min(path.start.y, path.end.y)
+                let maxY = max(path.start.y, path.end.y)
+                if px < minX { px = minX; if vx < 0 { vx = 0 } }
+                if px > maxX { px = maxX; if vx > 0 { vx = 0 } }
+                if py < minY { py = minY; if vy < 0 { vy = 0 } }
+                if py > maxY { py = maxY; if vy > 0 { vy = 0 } }
+            }
+
+            position = Point(x: px, y: py)
+            tipVelocity = Point(x: vx, y: vy)
+
+            // Track heading from tip motion while moving.
+            let mdx = vx
+            let mdy = vy
+            if (mdx * mdx + mdy * mdy) > 1.0 {
+                motionHeading = atan2(mdy, mdx)
+            }
+        }
+
+        if timeAccumulator < h * 1e-6 {
+            timeAccumulator = 0
+        }
+
+        // Snap exactly onto the target once path is complete and residual error/speed
+        // are inside tolerance — settling is exact, no residual oscillation.
+        if pathProgress >= 1,
+           abs(position.x - target.x) <= config.epsilon,
+           abs(position.y - target.y) <= config.epsilon,
+           tipSpeed() <= max(config.epsilon * 40, 8) {
+            position = target
+            tipVelocity = Point(x: 0, y: 0)
+            if let path = trajectory {
+                motionHeading = path.endHeading
+            }
+        }
+    }
+
+    private func pathProgressRate() -> Double {
+        // Map travelDuration to an exponential rate so progress ≈ 1 in ~travelDuration.
+        // e^(-rate·T) ≈ 0.02 → rate ≈ -ln(0.02)/T ≈ 3.9/T.
+        let duration = config.travelDuration.isFinite && config.travelDuration > 0.05
+            ? config.travelDuration
+            : 0.55
+        let dist: Double
+        if let t = trajectory {
+            let dx = t.end.x - t.start.x
+            let dy = t.end.y - t.start.y
+            dist = (dx * dx + dy * dy).squareRoot()
+        } else {
+            dist = 0
+        }
+        // Short hops finish faster; long flights stay near the nominal duration.
+        let scale = dist > 1 ? min(max(180.0 / dist, 0.55), 2.4) : 2.2
+        return (3.9 / duration) * scale
+    }
+
+    private func pathSample(at t: Double) -> Point {
+        if let path = trajectory {
+            return path.point(at: t)
+        }
+        return target
+    }
+
+    private func updatePose(dt: Double) {
         let speed = (velocity.x * velocity.x + velocity.y * velocity.y).squareRoot()
         let targetAngle = clampSym(velocity.x * config.leanPerSpeed, config.maxLean)
         let targetSkew = clampSym(velocity.x * config.skewPerSpeed, config.maxSkew)
         let stretch = min(speed * config.stretchPerSpeed, config.maxStretch)
         let targetScale = (isPressed(state) ? config.pressScale : 1.0) + stretch
 
-        // Ease the pose deviations toward their targets (framerate-independent).
         let poseStep = clamp01(1 - exp(-config.poseRate * dt))
         angle += (targetAngle - angle) * poseStep
         skew += (targetSkew - skew) * poseStep
         scale += (targetScale - scale) * poseStep
+        if !angle.isFinite { angle = 0 }
+        if !skew.isFinite { skew = 0 }
+        if !scale.isFinite { scale = 1 }
+    }
 
+    private func ageRipples(dt: Double) {
         // A deferred click ripple blooms the moment the tip ARRIVES at its target.
         if pendingPress, within(position, pendingPressTarget, config.epsilon) {
             ripples.append((center: pendingPressTarget, age: 0))
             pendingPress = false
         }
 
-        // Age ripples; drop the finished ones.
         for i in ripples.indices { ripples[i].age += dt }
         ripples.removeAll { $0.age >= config.rippleDuration }
+    }
+
+    private func tipSpeed() -> Double {
+        let x = tipVelocity.x
+        let y = tipVelocity.y
+        if !x.isFinite || !y.isFinite { return 0 }
+        return (x * x + y * y).squareRoot()
     }
 
     /// Rich render frame: pose + visual state + live ripples + settled. The presenter's
@@ -294,6 +578,11 @@ public final class CursorAnimator: CursorAnimating {
         state = .idle
         target = position
         velocity = Point(x: 0, y: 0)
+        tipVelocity = Point(x: 0, y: 0)
+        pathProgress = 1
+        trajectory = nil
+        pendingPress = false
+        timeAccumulator = 0
     }
 
     // MARK: - Helpers
@@ -314,6 +603,12 @@ public final class CursorAnimator: CursorAnimating {
     private func within(_ a: Point, _ b: Point, _ epsilon: Double) -> Bool {
         abs(a.x - b.x) <= epsilon && abs(a.y - b.y) <= epsilon
     }
+
+    private func finitePoint(_ p: Point, fallback: Point) -> Point {
+        let x = p.x.isFinite ? p.x : fallback.x
+        let y = p.y.isFinite ? p.y : fallback.y
+        return Point(x: x, y: y)
+    }
 }
 
 /// Symmetric clamp to `[-limit, limit]`.
@@ -323,6 +618,6 @@ public final class CursorAnimator: CursorAnimating {
 
 /// Cubic ease-out on `t ∈ [0,1]`.
 @inline(__always) func easeOutCubic(_ t: Double) -> Double {
-    let u = 1 - clamp01(t)
+    let u = 1 - t
     return 1 - u * u * u
 }

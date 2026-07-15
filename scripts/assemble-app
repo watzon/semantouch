@@ -1,0 +1,177 @@
+#!/bin/sh
+# Assemble an unsigned Semantouch.app from host + relay release binaries.
+# Signing is intentionally outside this script so CI can keep an ephemeral
+# keychain lifetime and fail-closed cleanup independent of layout work.
+#
+# Layout (case-insensitive volume safe):
+#   Semantouch.app/Contents/MacOS/SemantouchHost  (app host / CFBundleExecutable)
+#   Semantouch.app/Contents/MacOS/semantouch      (public stdio relay path)
+#
+# Both nested executables must already be universal2 (exactly arm64 + x86_64).
+set -eu
+
+if [ "$#" -ne 3 ]; then
+  printf '%s\n' "usage: $0 /path/to/SemantouchHost /path/to/semantouch /path/to/Semantouch.app" >&2
+  exit 2
+fi
+
+host=$1
+relay=$2
+app_path=$3
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+info_plist_template="$project_root/packaging/Semantouch.app/Info.plist"
+
+expected_bundle_id="tech.watzon.semantouch"
+expected_executable="SemantouchHost"
+expected_relay_name="semantouch"
+expected_min_os="14.0"
+expected_package_type="APPL"
+# lipo -archs order is stable for our lipo create invocations: arm64 x86_64
+expected_archs="arm64 x86_64"
+
+die() {
+  printf '%s\n' "assemble-app: $*" >&2
+  exit 1
+}
+
+require_macho_universal2() {
+  path=$1
+  label=$2
+
+  if [ ! -f "$path" ]; then
+    die "$label not found: $path"
+  fi
+  if [ ! -r "$path" ]; then
+    die "$label is not readable: $path"
+  fi
+
+  file_info=$(/usr/bin/file -b "$path" 2>/dev/null || true)
+  case $file_info in
+    *Mach-O*) ;;
+    *)
+      die "$label is not a Mach-O executable: $path ($file_info)"
+      ;;
+  esac
+
+  archs=$(/usr/bin/lipo -archs "$path" 2>/dev/null || true)
+  if [ -z "$archs" ]; then
+    die "could not read architecture for $label: $path"
+  fi
+
+  # Normalize whitespace and require both slices, refuse single-slice builds.
+  normalized=$(printf '%s' "$archs" | /usr/bin/tr -s '[:space:]' ' ' | /usr/bin/sed 's/^ //;s/ $//')
+  has_arm64=0
+  has_x86_64=0
+  for arch in $normalized; do
+    case $arch in
+      arm64) has_arm64=1 ;;
+      x86_64) has_x86_64=1 ;;
+      *)
+        die "$label has unexpected architecture slice: $arch ($path; archs=$normalized)"
+        ;;
+    esac
+  done
+
+  if [ "$has_arm64" -ne 1 ] || [ "$has_x86_64" -ne 1 ]; then
+    die "$label must be universal2 ($expected_archs), got: $normalized ($path)"
+  fi
+
+  # Exact two-slice set only.
+  slice_count=$(printf '%s\n' $normalized | /usr/bin/wc -w | /usr/bin/tr -d ' ')
+  if [ "$slice_count" -ne 2 ]; then
+    die "$label must contain exactly two architecture slices, got: $normalized ($path)"
+  fi
+}
+
+case $app_path in
+  */Semantouch.app|Semantouch.app) ;;
+  *)
+    die "output path must be named Semantouch.app (got: $app_path)"
+    ;;
+esac
+
+if [ ! -f "$info_plist_template" ]; then
+  die "Info.plist template missing: $info_plist_template"
+fi
+
+require_macho_universal2 "$host" "host executable"
+require_macho_universal2 "$relay" "relay executable"
+
+host_abs=$(CDPATH= cd -- "$(dirname -- "$host")" && pwd)/$(basename -- "$host")
+relay_abs=$(CDPATH= cd -- "$(dirname -- "$relay")" && pwd)/$(basename -- "$relay")
+if [ "$host_abs" = "$relay_abs" ]; then
+  die "host and relay must be distinct files"
+fi
+
+# Guard the case-insensitive MacOS volume collision that would collapse
+# Semantouch/semantouch into one path.
+host_leaf=$(basename -- "$host")
+relay_leaf=$(basename -- "$relay")
+host_leaf_lc=$(printf '%s' "$host_leaf" | /usr/bin/tr '[:upper:]' '[:lower:]')
+relay_leaf_lc=$(printf '%s' "$relay_leaf" | /usr/bin/tr '[:upper:]' '[:lower:]')
+if [ "$host_leaf_lc" = "$relay_leaf_lc" ]; then
+  die "host and relay basenames collide case-insensitively ($host_leaf / $relay_leaf); install names are SemantouchHost + semantouch"
+fi
+
+version=$(/usr/bin/plutil -extract version raw "$project_root/package.json")
+if [ -z "$version" ]; then
+  die "could not read version from package.json"
+fi
+
+template_executable=$(/usr/bin/plutil -extract CFBundleExecutable raw "$info_plist_template")
+template_bundle_id=$(/usr/bin/plutil -extract CFBundleIdentifier raw "$info_plist_template")
+template_package_type=$(/usr/bin/plutil -extract CFBundlePackageType raw "$info_plist_template")
+template_min_os=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$info_plist_template")
+
+if [ "$template_executable" != "$expected_executable" ]; then
+  die "Info.plist CFBundleExecutable must be $expected_executable (got: $template_executable)"
+fi
+if [ "$template_bundle_id" != "$expected_bundle_id" ]; then
+  die "Info.plist CFBundleIdentifier must be $expected_bundle_id (got: $template_bundle_id)"
+fi
+if [ "$template_package_type" != "$expected_package_type" ]; then
+  die "Info.plist CFBundlePackageType must be $expected_package_type (got: $template_package_type)"
+fi
+if [ "$template_min_os" != "$expected_min_os" ]; then
+  die "Info.plist LSMinimumSystemVersion must be $expected_min_os (got: $template_min_os)"
+fi
+
+if [ -e "$app_path" ]; then
+  /bin/rm -rf "$app_path"
+fi
+
+macos_dir="$app_path/Contents/MacOS"
+contents_dir="$app_path/Contents"
+/bin/mkdir -p "$macos_dir"
+
+/bin/cp "$info_plist_template" "$contents_dir/Info.plist"
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$version" "$contents_dir/Info.plist"
+/usr/bin/plutil -replace CFBundleVersion -string "$version" "$contents_dir/Info.plist"
+/usr/bin/plutil -lint "$contents_dir/Info.plist" >/dev/null
+
+/usr/bin/install -m 0755 "$host" "$macos_dir/$expected_executable"
+/usr/bin/install -m 0755 "$relay" "$macos_dir/$expected_relay_name"
+
+if [ ! -x "$macos_dir/$expected_executable" ] || [ ! -x "$macos_dir/$expected_relay_name" ]; then
+  die "assembled executables are not executable under $macos_dir"
+fi
+
+# Confirm both names remain distinct after install on this volume.
+installed_host_inode=$(/usr/bin/stat -f '%i' "$macos_dir/$expected_executable")
+installed_relay_inode=$(/usr/bin/stat -f '%i' "$macos_dir/$expected_relay_name")
+if [ "$installed_host_inode" = "$installed_relay_inode" ]; then
+  die "host and relay collapsed to one inode under $macos_dir (case-insensitive volume collision)"
+fi
+
+require_macho_universal2 "$macos_dir/$expected_executable" "assembled host executable"
+require_macho_universal2 "$macos_dir/$expected_relay_name" "assembled relay executable"
+
+short_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$contents_dir/Info.plist")
+bundle_version=$(/usr/bin/plutil -extract CFBundleVersion raw "$contents_dir/Info.plist")
+if [ "$short_version" != "$version" ] || [ "$bundle_version" != "$version" ]; then
+  die "assembled Info.plist version mismatch: short=$short_version bundle=$bundle_version expected=$version"
+fi
+
+printf '%s\n' "assemble-app: built $app_path (v$version, host=$expected_executable relay=$expected_relay_name universal2)"

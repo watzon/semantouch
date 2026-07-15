@@ -5,6 +5,22 @@ must follow, and the safety policy that gates every action. The frozen wire cont
 [PROTOCOL.md](PROTOCOL.md) (it overrides this document on any wire-level detail); the
 safety model is [SECURITY.md](SECURITY.md).
 
+**Verified surface (current package version `0.2.1`):** `tools/list` returns exactly **16**
+enabled tools from `Sources/MCPServer/ToolCatalog.swift` (`ToolCatalog.enabledNames`), in
+catalog order. Public computer-use support is **macOS only** today; Windows/Linux are not GA.
+
+## Host model (macOS)
+
+Released installs run a signed `Semantouch.app` host that owns Accessibility and Screen
+Recording (TCC). OMP launches the nested stdio relay at
+`Semantouch.app/Contents/MacOS/semantouch` with args `["mcp"]`
+(`Sources/SemantouchCLIKit/Packaging.swift`, `packaging/omp-mcp-config.example.json`).
+That relay authenticates to the resident host over a private Unix-domain socket and
+opaque-relays stdin/stdout bytes (`Sources/SemantouchCLI/main.swift`,
+`Sources/SemantouchIPC/*`). Engine work (AX, capture, actions, doctor) executes only
+inside the host process (`Sources/SemantouchApp/main.swift`,
+`Sources/SemantouchApp/HostController.swift`).
+
 ## MCP envelope
 
 The server speaks newline-delimited JSON-RPC 2.0 over stdio. A tool is invoked with
@@ -29,15 +45,20 @@ and the structured error (`{ code, message, data? }`) as the text payload:
 ```
 
 Below, each tool shows the `arguments` object and the decoded payload (the JSON inside the
-text block). Error codes are listed in [PROTOCOL.md](PROTOCOL.md) §6.
+text block). Error codes are listed in [PROTOCOL.md](PROTOCOL.md) §6. Schemas are frozen in
+`Sources/MCPServer/ToolSchemas.swift`.
 
 ---
 
-## The fourteen tools
+## The sixteen tools
 
-`tools/list` returns exactly these, in this order: `doctor`, `list_apps`, `get_app_state`,
-`screenshot`, `end_app_session`, `click`, `perform_action`, `set_value`, `select_text`,
-`scroll`, `press_key`, `type_text`, `drag`, `wait_for`.
+`tools/list` returns exactly these, in this order
+(`Sources/MCPServer/ToolCatalog.swift`, asserted by
+`Tests/ProtocolContractTests/ProtocolContractTests.swift`):
+
+`doctor`, `list_apps`, `launch_app`, `get_app_state`, `read_text`, `screenshot`,
+`end_app_session`, `click`, `perform_action`, `set_value`, `select_text`, `scroll`,
+`press_key`, `type_text`, `drag`, `wait_for`.
 
 ### 1. `doctor` — permission status (read-only)
 
@@ -46,7 +67,7 @@ text block). Error codes are listed in [PROTOCOL.md](PROTOCOL.md) §6.
 {}                          // or { "requestOnboarding": false }
 // payload
 {
-  "helper": { "path": "/…/semantouch", "signed": true, "version": "0.2.1" },
+  "helper": { "path": "/…/SemantouchHost", "signed": true, "version": "0.2.1" },
   "accessibility": "granted",
   "screenRecording": "granted",
   "ready": true,
@@ -54,8 +75,11 @@ text block). Error codes are listed in [PROTOCOL.md](PROTOCOL.md) §6.
 }
 ```
 
-Reports each grant independently and names the exact binary needing it. Never prompts
-unless `requestOnboarding: true`.
+Reports each grant independently and names the exact host binary needing it
+(`Sources/ComputerUseService/DoctorService.swift`). Never prompts unless
+`requestOnboarding: true`. In the app-host model, grant the **Semantouch.app** host
+(bundle id `tech.watzon.semantouch`, executable `SemantouchHost`), not the nested
+relay (`Sources/SemantouchCLIKit/Packaging.swift` `tccOwnershipDescription`).
 
 ### 2. `list_apps` — running/installed apps
 
@@ -67,8 +91,24 @@ unless `requestOnboarding: true`.
 ```
 
 `id` is the bundle id when available, else the `.app` path, else `pid:<pid>`.
+`list_apps` never launches or recovers apps
+(`Tests/ProtocolContractTests/AppLifecycleTests.swift`).
 
-### 3. `get_app_state` — window state + screenshot
+### 3. `launch_app` — explicit launch / recovery (mutating lifecycle)
+
+```jsonc
+// arguments
+{ "app": "TextEdit", "activate": true, "waitForWindowMs": 3000 }
+// payload
+{ "app": { "id": "com.apple.TextEdit", "displayName": "TextEdit", "pid": 812, "isRunning": true, "windows": 1 },
+  "launched": true, "recovered": false }
+```
+
+Explicit lifecycle only: ordinary app resolution must never silently launch
+(`Sources/ComputerUseService/AppLauncher.swift`, `Sources/MCPServer/ToolSchemas.swift`).
+Policy-gated before workspace calls. Does not build an accessibility tree.
+
+### 4. `get_app_state` — window state + screenshot
 
 ```jsonc
 // arguments
@@ -100,24 +140,37 @@ pass `0`) on the first call so the server selects the focused/main/best window. 
 positive `windowId` only when it came from an earlier successful response's `window.id`.
 Never try `0`, `1`, `2`, … as window ordinals.
 
-v1.5 additions (PROTOCOL §18):
+v1.5 additions (PROTOCOL §18; `Sources/ComputerUseCore/DTOs.swift`):
 
 - The payload MAY carry `windows` — every window of the app with `id` (when targetable via
   `windowId`), `title`, `framePoints`, `focused`, `main`, `onScreen` — and
-  `window.document` — `{ url?, title? }` from the window's principal web area (the "where
-  is the browser now" signal).
+  `window.document` — `{ url?, title? }` from the window's principal web area.
 - `scopeElementId: "e<N>"` re-walks the tree rooted at an element of the current snapshot
   (e.g. a web area) so the node budget is spent past the chrome; the scoped snapshot
-  advances the revision and retires all other ids. An id that cannot be honored (first
-  snapshot, retired/unknown id, wrong window) degrades to a full unscoped snapshot with a
-  `scope_ignored` warning instead of an error — copy fresh ids from that tree and re-scope.
+  advances the revision and retires all other ids. An id that cannot be honored degrades
+  to a full unscoped snapshot with a `scope_ignored` warning instead of an error.
   `maxNodes` (1–2000) raises the node budget for one snapshot.
 - Chromium/Electron web content is enabled automatically on first contact
   (`AXManualAccessibility` / `AXEnhancedUserInterface`); a `web_content_enabled` warning
-  means the page tree may still be materializing — snapshot again before concluding
-  content is missing. Opt out with `SEMANTOUCH_WEB_AX=off`.
+  means the page tree may still be materializing. Opt out with `SEMANTOUCH_WEB_AX=off`.
 
-### 4. `screenshot` — capture the window, nothing else (read-only, v1.5)
+### 5. `read_text` — full live AXValue (read-only)
+
+```jsonc
+// arguments
+{ "app": "computer-use-fixture", "sessionId": "s1", "revision": 3, "elementId": "e5", "limit": 4096 }
+// or { "limit": "max" }
+// payload
+{ "text": "…", "totalBytes": 12000, "returnedBytes": 4096, "truncated": true }
+```
+
+Reads the live `AXValue` string of one revision-checked element without advancing the
+revision or rebuilding the tree (`Sources/ComputerUseService/ReadTextService.swift`).
+Default `limit` is 4096 UTF-8 bytes; `"max"` returns the full string. Rejects secure text
+fields. Truncation never splits an extended grapheme cluster
+(`Tests/ProtocolContractTests/ReadTextToolTests.swift`).
+
+### 6. `screenshot` — capture the window only (read-only)
 
 ```jsonc
 // arguments
@@ -130,14 +183,11 @@ v1.5 additions (PROTOCOL §18):
   "warnings": [] }
 ```
 
-The cheap "just look" primitive: no settle wait, no tree walk, and — unlike
-`get_app_state` — **no revision advance, so existing element ids stay valid**. Prefer it
-whenever the question is visual ("did the page render?", "what does the dialog say?");
-use `get_app_state` only when you need elements to target. Requires Screen Recording
-(hard `permission_denied` otherwise). Refreshes the session's `space: "screenshot"`
-coordinate mapping, so screenshot-pixel clicks always refer to the latest image.
+No settle wait, no tree walk, and — unlike `get_app_state` — **no revision advance**, so
+existing element ids stay valid. Requires Screen Recording (hard `permission_denied`
+otherwise). Refreshes the session's `space: "screenshot"` coordinate mapping.
 
-### 5. `end_app_session` — release a session
+### 7. `end_app_session` — release a session
 
 ```jsonc
 // arguments
@@ -147,9 +197,9 @@ coordinate mapping, so screenshot-pixel clicks always refer to the latest image.
 ```
 
 Drops the session's observers, caches, element table, and cursor overlay. Ending an
-unknown session is not an error.
+unknown session is not an error (`ended: false`).
 
-### 6. `click` — press an element (or a point)
+### 8. `click` — press an element (or a point)
 
 ```jsonc
 // semantic (preferred): AXPress the element
@@ -160,7 +210,7 @@ unknown session is not an error.
 { "status": "completed", "method": "accessibility", "stateChanged": true, "refreshRecommended": true }
 ```
 
-### 7. `perform_action` — named AX action
+### 9. `perform_action` — named AX action
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "revision": 3, "elementId": "e10", "action": "AXShowMenu" }
@@ -170,7 +220,7 @@ unknown session is not an error.
 
 The tree lists each element's supported actions; never guess an action name.
 
-### 8. `set_value` — set a settable element's value
+### 10. `set_value` — set a settable element's value
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "revision": 3, "elementId": "e5", "value": "hello" }
@@ -186,7 +236,7 @@ the server focuses the element, writes, then performs `AXConfirm` when the eleme
 advertises it — `committed: false` means write-only (follow up with an element-targeted
 `press_key` `"enter"`).
 
-### 9. `select_text` — select a range / place the caret
+### 11. `select_text` — select a range / place the caret
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "revision": 3, "elementId": "e5", "start": 0, "length": 5 }
@@ -194,7 +244,7 @@ advertises it — `committed: false` means write-only (follow up with an element
 
 `length: 0` places the insertion caret at `start`.
 
-### 10. `scroll` — scroll an element (or a point)
+### 12. `scroll` — scroll an element (or a point)
 
 ```jsonc
 // semantic (preferred)
@@ -205,7 +255,7 @@ advertises it — `committed: false` means write-only (follow up with an element
 
 `direction` ∈ `up|down|left|right`; `by` ∈ `line|page`.
 
-### 11. `press_key` — keyboard shortcut / sequence (fallback)
+### 13. `press_key` — keyboard shortcut / sequence (fallback)
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "combo": "cmd+shift+a" }
@@ -221,7 +271,7 @@ and exactly one key token with `+`, e.g. `"cmd+s"`, `"ctrl+a"`, `"enter"`,
 `revision` + `elementId` pair (always together) sets accessibility focus on that element
 before synthesis and reports `elementFocused`.
 
-### 12. `type_text` — literal Unicode text (fallback)
+### 14. `type_text` — literal Unicode text (fallback)
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "text": "Hello, world" }
@@ -229,7 +279,7 @@ before synthesis and reports `elementFocused`.
 
 Accepts the same optional `revision` + `elementId` pair as `press_key`.
 
-### 13. `drag` — coordinate drag (fallback)
+### 15. `drag` — coordinate drag (fallback)
 
 ```jsonc
 { "app": "computer-use-fixture", "sessionId": "s1", "from": { "x": 40, "y": 40 }, "to": { "x": 200, "y": 220 }, "button": "left" }
@@ -238,7 +288,7 @@ Accepts the same optional `revision` + `elementId` pair as `press_key`.
 Points are in window coordinates by default (`space: "window"`) or screenshot pixels
 (`space: "screenshot"`).
 
-### 14. `wait_for` — verify a UI transition (read-only, v1.5)
+### 16. `wait_for` — verify a UI transition (read-only)
 
 ```jsonc
 { "app": "com.example.Browser", "sessionId": "s2",
@@ -270,15 +320,19 @@ the app. It returns the current tree (a diff after the first turn) and the `revi
 element ids the turn's actions must use. Batch the turn's safe semantic actions against
 that snapshot; do not re-fetch state between every action. Refresh (call `get_app_state`
 again) only when an `ActionResult` sets `refreshRecommended: true`, when you get a
-`stale_*` error, or at the start of the next turn.
+`stale_*` error, or at the start of the next turn. Prefer `screenshot` for visual-only
+checks; it does not advance the revision.
 
 ## Discipline: the revision / stale-id contract
 
 Element ids are **opaque, session-scoped, and bound to the revision that produced them**
-(PROTOCOL.md §3). Every element-targeted action carries the quadruple `{ app, sessionId,
-revision, elementId }`, where `revision` is the revision the `elementId` was observed in.
+(PROTOCOL.md §3; `Sources/AccessibilityEngine/StableElementTable.swift`). Every
+element-targeted action carries the quadruple `{ app, sessionId, revision, elementId }`,
+where `revision` is the revision the `elementId` was observed in.
 
-The server validates in this order and rejects rather than guessing:
+The server validates in this order and rejects rather than guessing
+(`Sources/ActionEngine/ActionExecutor.swift`, unit coverage in
+`Tests/ActionEngineTests/ActionExecutorTests.swift`):
 
 1. Unknown/ended session → `stale_revision` with `data.current: null`.
 2. `revision` ≠ the session's current revision → `stale_revision` with `data.current: <n>`.
@@ -287,6 +341,15 @@ The server validates in this order and rejects rather than guessing:
 On any `stale_*` error, the agent MUST call `get_app_state` again and retarget using the
 fresh ids/revision. Never reuse an id from an earlier snapshot or parse an id to guess a
 neighbor.
+
+## Discipline: action evidence
+
+Mutating tools return an `ActionResult` (`Sources/ComputerUseCore/DTOs.swift`) with at
+least `status`, `method`, `stateChanged`, and `refreshRecommended`. Fallback / focus paths
+MAY also report `focusChanged`, `focusRestored`, `targetVerified`, and `elementFocused`.
+Successful mutating tools MAY attach a refreshed `state` snapshot; rejected tools do not.
+Treat `status: "completed"` as **delivery evidence**, not semantic success — use
+`wait_for` or a later `get_app_state` when the task depends on a UI transition.
 
 ## Discipline: the interference policy (fallback input)
 
@@ -303,16 +366,18 @@ Default to `background-only`. **The agent must not silently escalate** — choos
 higher mode only when the task genuinely needs it, and prefer semantic actions,
 which are background-safe and never move the system pointer.
 
-> **Platform reality (macOS 14+, verified on macOS 26).** Foregrounding a *background* app
-> from this helper is restricted by the OS: `allow-brief-focus` / `foreground-takeover` first
-> call `NSRunningApplication.activate()` and, if that does not actually bring the target
-> frontmost, fall back to a PUBLIC Accessibility raise (`kAXFrontmost` / raise main window,
-> using the Accessibility grant you already gave — **no extra permission**). If neither
-> foregrounds the target, the call still returns `focus_required` / `status: "rejected"` and
-> delivers **nothing** — it never types into the wrong app. Because of this, the only path
-> guaranteed to deliver on macOS 14+ is **the target already frontmost** (`background-only`,
-> deliver-in-background). Treat the higher modes as best-effort, and check `targetVerified` /
-> `status` in the result rather than assuming focus was taken.
+> **Platform reality (macOS 14+, verified on macOS 26 in TEST-MATRIX live notes).**
+> Foregrounding a *background* app from this helper is restricted by the OS:
+> `allow-brief-focus` / `foreground-takeover` first call `NSRunningApplication.activate()`
+> and, if that does not actually bring the target frontmost, fall back to a PUBLIC
+> Accessibility raise (`kAXFrontmost` / raise main window, using the Accessibility grant
+> already given — **no extra permission**). If neither foregrounds the target, the call
+> still returns `focus_required` / `status: "rejected"` and delivers **nothing** — it never
+> types into the wrong app. Because of this, the only path guaranteed to deliver on
+> macOS 14+ is **the target already frontmost** (`background-only`, deliver-in-background).
+> Treat the higher modes as best-effort, and check `targetVerified` / `status` in the
+> result rather than assuming focus was taken. See [SECURITY.md](SECURITY.md) §7 and
+> [TEST-MATRIX.md](TEST-MATRIX.md) §4.
 
 Fallback results add `focusChanged` / `focusRestored` / `targetVerified`. If the physical
 user intervenes mid-action, the call returns `status: "interrupted"` (with
@@ -341,7 +406,8 @@ There is **no** mutation allowlist and **no** built-in hard-denied app set. Ordi
 Example — deny Terminal and Keychain Access while leaving everything else open:
 
 ```json
-{ "mcpServers": { "semantouch": { "type": "stdio", "command": "/…/semantouch", "args": ["mcp"],
+{ "mcpServers": { "semantouch": { "type": "stdio",
+    "command": "/Applications/Semantouch.app/Contents/MacOS/semantouch", "args": ["mcp"],
     "env": { "SEMANTOUCH_DENIED_APPS": "com.apple.Terminal,Terminal,Keychain Access" } } } }
 ```
 

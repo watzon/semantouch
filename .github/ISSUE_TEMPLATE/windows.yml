@@ -1,0 +1,66 @@
+name: Windows capability / bug
+description: Windows runtime, UIA, capture, input, or packaging issue. Windows is planned and not GA unless a release says otherwise.
+title: "Windows: "
+labels: ["bug", "windows"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Windows support is planned and must preserve the full Semantouch contract. Say clearly if this is a design proposal vs a failing experimental build. Redact secrets.
+  - type: dropdown
+    id: maturity
+    attributes:
+      label: What are you reporting?
+      options:
+        - experimental build failure
+        - contract/design gap
+        - packaging/signing gap
+        - documentation mismatch
+        - other
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version / edition
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - x64
+        - arm64
+        - unknown
+    validations:
+      required: true
+  - type: input
+    id: session
+    attributes:
+      label: Session type
+      description: Interactive desktop, RDP, CI runner, etc.
+      placeholder: interactive console session
+    validations:
+      required: true
+  - type: textarea
+    id: capability
+    attributes:
+      label: Capability matrix evidence
+      description: Which tools/APIs work, which return typed capability errors, and which fail silently if any.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction or design proposal
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Contract impact
+      description: Stable IDs, revisions, diffs, waits, policy, interference evidence, tool parity with macOS.
+    validations:
+      required: true

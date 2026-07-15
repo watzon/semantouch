@@ -74,11 +74,13 @@ public enum StateWarningCode: String, Codable, Equatable, Sendable, CaseIterable
 
 // MARK: - AppSummary (list_apps, get_app_state, ambiguous_app candidates)
 
-/// One application as reported by `list_apps` and embedded in `AppState`/errors (§4.1).
+/// One application as reported by `list_apps` / `launch_app` and embedded in
+/// `AppState`/errors (§4.1).
 ///
 /// `id` is the bundle id when available, else the absolute `.app` path, else
-/// `"pid:<pid>"`. `pid`/`path`/`lastUsedAt` are optional; `lastUsedAt` is never
-/// emitted in Phase 1.
+/// `"pid:<pid>"`. `pid`/`path`/`lastUsedAt`/`useCount` are optional and omit-when-nil
+/// on the wire. `lastUsedAt` / `useCount` are populated from public Spotlight metadata
+/// when available.
 public struct AppSummary: Codable, Equatable, Sendable {
     public var id: String
     public var displayName: String
@@ -87,6 +89,8 @@ public struct AppSummary: Codable, Equatable, Sendable {
     public var isRunning: Bool
     public var windows: Int
     public var lastUsedAt: String?
+    /// Spotlight-derived use rank when available; omitted when unknown.
+    public var useCount: Int?
 
     public init(
         id: String,
@@ -95,7 +99,8 @@ public struct AppSummary: Codable, Equatable, Sendable {
         pid: Int? = nil,
         isRunning: Bool,
         windows: Int,
-        lastUsedAt: String? = nil
+        lastUsedAt: String? = nil,
+        useCount: Int? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -104,6 +109,7 @@ public struct AppSummary: Codable, Equatable, Sendable {
         self.isRunning = isRunning
         self.windows = windows
         self.lastUsedAt = lastUsedAt
+        self.useCount = useCount
     }
 }
 
@@ -113,6 +119,58 @@ public struct ListAppsResult: Codable, Equatable, Sendable {
 
     public init(apps: [AppSummary]) {
         self.apps = apps
+    }
+}
+
+// MARK: - LaunchApp (launch_app input/output)
+
+/// Decoded `launch_app` params. Custom `Decodable` applies protocol defaults
+/// (`activate=true`, `waitForWindowMs=3000`) for missing keys.
+///
+/// Explicit lifecycle tool only: ordinary app resolution must never silently launch
+/// or recover a hidden/minimized app. No `SnapshotOptions` — this is not an action
+/// with post-mutation state attachment.
+public struct LaunchAppRequest: Codable, Equatable, Sendable {
+    public var app: String
+    /// Whether to activate (bring forward) the app after launch/recovery. Default `true`.
+    public var activate: Bool
+    /// Bound, in milliseconds, on waiting for a first capturable window after launch
+    /// or recovery. Default `3000`.
+    public var waitForWindowMs: Int
+
+    public init(app: String, activate: Bool = true, waitForWindowMs: Int = 3000) {
+        self.app = app
+        self.activate = activate
+        self.waitForWindowMs = waitForWindowMs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case app, activate, waitForWindowMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.app = try container.decode(String.self, forKey: .app)
+        self.activate = try container.decodeIfPresent(Bool.self, forKey: .activate) ?? true
+        self.waitForWindowMs = try container.decodeIfPresent(Int.self, forKey: .waitForWindowMs) ?? 3000
+    }
+}
+
+/// `launch_app` result payload: `{ "app": AppSummary, "launched": Bool, "recovered": Bool }`.
+///
+/// `launched` is true when this call started a not-yet-running process.
+/// `recovered` is true when this call unhid/unminimized an already-running app
+/// (or otherwise recovered a hidden window surface). Both may be false when the
+/// app was already running and visible and only activation was applied.
+public struct LaunchAppResult: Codable, Equatable, Sendable {
+    public var app: AppSummary
+    public var launched: Bool
+    public var recovered: Bool
+
+    public init(app: AppSummary, launched: Bool, recovered: Bool) {
+        self.app = app
+        self.launched = launched
+        self.recovered = recovered
     }
 }
 
@@ -165,11 +223,13 @@ public struct DoctorResult: Codable, Equatable, Sendable {
     }
 }
 
-// MARK: - GetAppStateRequest (get_app_state input, §4.1)
+// MARK: - SnapshotOptions (shared observation options)
 
-/// Decoded `get_app_state` params. Custom `Decodable` applies the protocol
-/// defaults (`forceFullTree=false`, `disableDiff=false`, `includeScreenshot="auto"`)
-/// for missing keys, which synthesized `Codable` would not do.
+/// Shared observation options for `get_app_state` and post-action state refresh.
+/// Defaults match `get_app_state` (`forceFullTree=false`, `disableDiff=false`,
+/// `includeScreenshot="auto"`). Decoded from flat tool arguments — unknown keys
+/// (e.g. action fields) are ignored by Codable; schemas still enforce
+/// `additionalProperties: false` at the wire boundary.
 ///
 /// `forceFullTree` and `disableDiff` are both diff-suppression switches (§15.1): either
 /// one forces a full tree for that snapshot, and the server treats a full tree they
@@ -178,6 +238,80 @@ public struct DoctorResult: Codable, Equatable, Sendable {
 /// `forceFullTree` also **rebuilds ids** (the session's element table is retired so every
 /// element is re-minted a fresh id), whereas `disableDiff` keeps ids stable and only
 /// re-sends the whole tree text. Both leave the monotonic id counter intact (§3).
+public struct SnapshotOptions: Codable, Equatable, Sendable {
+    /// A positive WindowServer id. `nil` or the null WindowServer id `0` requests automatic selection.
+    public var windowId: Int?
+    public var forceFullTree: Bool
+    public var disableDiff: Bool
+    public var includeScreenshot: ScreenshotMode
+    /// Root the walk at an element of the session's **current** snapshot instead of the
+    /// window (`^e[0-9]+$`). `nil` requests an ordinary whole-window snapshot.
+    public var scopeElementId: String?
+    /// Per-snapshot node budget overriding the §7.5 default (600). Clamped to the frozen
+    /// hard ceiling `1...2000` by the pipeline; `nil` uses the default.
+    public var maxNodes: Int?
+
+    public init(
+        windowId: Int? = nil,
+        forceFullTree: Bool = false,
+        disableDiff: Bool = false,
+        includeScreenshot: ScreenshotMode = .auto,
+        scopeElementId: String? = nil,
+        maxNodes: Int? = nil
+    ) {
+        self.windowId = windowId == 0 ? nil : windowId
+        self.forceFullTree = forceFullTree
+        self.disableDiff = disableDiff
+        self.includeScreenshot = includeScreenshot
+        self.scopeElementId = scopeElementId
+        self.maxNodes = maxNodes
+    }
+
+    /// Whether this request suppresses the diff and demands a full tree (§15.1).
+    public var suppressesDiff: Bool { forceFullTree || disableDiff }
+
+    /// Whether this is a scoped snapshot (§18.2): rooted at an element, always full,
+    /// never a diff base.
+    public var isScoped: Bool { scopeElementId != nil }
+
+    /// Convert to a flat `get_app_state` request for the given app. Wire shape of
+    /// `GetAppStateRequest` stays flat; this is a computed conversion, not nesting.
+    public func asGetAppStateRequest(app: String) -> GetAppStateRequest {
+        GetAppStateRequest(
+            app: app,
+            windowId: windowId,
+            forceFullTree: forceFullTree,
+            disableDiff: disableDiff,
+            includeScreenshot: includeScreenshot,
+            scopeElementId: scopeElementId,
+            maxNodes: maxNodes
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case windowId, forceFullTree, disableDiff, includeScreenshot, scopeElementId, maxNodes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedWindowId = try container.decodeIfPresent(Int.self, forKey: .windowId)
+        self.windowId = decodedWindowId == 0 ? nil : decodedWindowId
+        self.forceFullTree = try container.decodeIfPresent(Bool.self, forKey: .forceFullTree) ?? false
+        self.disableDiff = try container.decodeIfPresent(Bool.self, forKey: .disableDiff) ?? false
+        self.includeScreenshot = try container.decodeIfPresent(ScreenshotMode.self, forKey: .includeScreenshot) ?? .auto
+        self.scopeElementId = try container.decodeIfPresent(String.self, forKey: .scopeElementId)
+        self.maxNodes = try container.decodeIfPresent(Int.self, forKey: .maxNodes)
+    }
+}
+
+// MARK: - GetAppStateRequest (get_app_state input, §4.1)
+
+/// Decoded `get_app_state` params. Custom `Decodable` applies the protocol
+/// defaults (`forceFullTree=false`, `disableDiff=false`, `includeScreenshot="auto"`)
+/// for missing keys, which synthesized `Codable` would not do.
+///
+/// Public properties and the flat wire shape are unchanged; observation knobs are
+/// shared with mutating tools via `SnapshotOptions` (see `snapshotOptions`).
 public struct GetAppStateRequest: Codable, Equatable, Sendable {
     public var app: String
     /// A positive WindowServer id. `nil` or the null WindowServer id `0` requests automatic selection.
@@ -210,12 +344,37 @@ public struct GetAppStateRequest: Codable, Equatable, Sendable {
         self.maxNodes = maxNodes
     }
 
+    /// Build from shared observation options without nesting them on the wire.
+    public init(app: String, options: SnapshotOptions) {
+        self.init(
+            app: app,
+            windowId: options.windowId,
+            forceFullTree: options.forceFullTree,
+            disableDiff: options.disableDiff,
+            includeScreenshot: options.includeScreenshot,
+            scopeElementId: options.scopeElementId,
+            maxNodes: options.maxNodes
+        )
+    }
+
+    /// The shared observation options carried by this request.
+    public var snapshotOptions: SnapshotOptions {
+        SnapshotOptions(
+            windowId: windowId,
+            forceFullTree: forceFullTree,
+            disableDiff: disableDiff,
+            includeScreenshot: includeScreenshot,
+            scopeElementId: scopeElementId,
+            maxNodes: maxNodes
+        )
+    }
+
     /// Whether this request suppresses the diff and demands a full tree (§15.1).
-    public var suppressesDiff: Bool { forceFullTree || disableDiff }
+    public var suppressesDiff: Bool { snapshotOptions.suppressesDiff }
 
     /// Whether this is a scoped snapshot (§18.2): rooted at an element, always full,
     /// never a diff base.
-    public var isScoped: Bool { scopeElementId != nil }
+    public var isScoped: Bool { snapshotOptions.isScoped }
 
     private enum CodingKeys: String, CodingKey {
         case app, windowId, forceFullTree, disableDiff, includeScreenshot, scopeElementId, maxNodes
@@ -224,13 +383,15 @@ public struct GetAppStateRequest: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.app = try container.decode(String.self, forKey: .app)
-        let decodedWindowId = try container.decodeIfPresent(Int.self, forKey: .windowId)
-        self.windowId = decodedWindowId == 0 ? nil : decodedWindowId
-        self.forceFullTree = try container.decodeIfPresent(Bool.self, forKey: .forceFullTree) ?? false
-        self.disableDiff = try container.decodeIfPresent(Bool.self, forKey: .disableDiff) ?? false
-        self.includeScreenshot = try container.decodeIfPresent(ScreenshotMode.self, forKey: .includeScreenshot) ?? .auto
-        self.scopeElementId = try container.decodeIfPresent(String.self, forKey: .scopeElementId)
-        self.maxNodes = try container.decodeIfPresent(Int.self, forKey: .maxNodes)
+        // Reuse SnapshotOptions defaults/normalization; extra keys (none on this schema)
+        // are ignored by its CodingKeys.
+        let options = try SnapshotOptions(from: decoder)
+        self.windowId = options.windowId
+        self.forceFullTree = options.forceFullTree
+        self.disableDiff = options.disableDiff
+        self.includeScreenshot = options.includeScreenshot
+        self.scopeElementId = options.scopeElementId
+        self.maxNodes = options.maxNodes
     }
 }
 
@@ -501,6 +662,11 @@ public struct ActionResult: Codable, Equatable, Sendable {
     /// an `elementId`. `true` iff the bounded AXFocusedUIElement re-read confirmed the target
     /// element (or a descendant) holds keyboard focus. Omitted (nil) otherwise.
     public var elementFocused: Bool?
+    /// Post-action observation: a fresh `AppState` (preferring a reconstructable diff)
+    /// attached after a committed mutation. Omitted (nil) when no refresh ran (rejected
+    /// actions, or a non-cancellation refresh failure that keeps the committed result).
+    /// Optional screenshot bytes remain a separate MCP image content block, not embedded here.
+    public var state: AppState?
 
     public init(
         status: ActionStatus,
@@ -512,7 +678,8 @@ public struct ActionResult: Codable, Equatable, Sendable {
         focusRestored: Bool? = nil,
         targetVerified: Bool? = nil,
         committed: Bool? = nil,
-        elementFocused: Bool? = nil
+        elementFocused: Bool? = nil,
+        state: AppState? = nil
     ) {
         self.status = status
         self.method = method
@@ -524,6 +691,7 @@ public struct ActionResult: Codable, Equatable, Sendable {
         self.targetVerified = targetVerified
         self.committed = committed
         self.elementFocused = elementFocused
+        self.state = state
     }
 }
 
@@ -583,6 +751,122 @@ public struct WaitForResult: Codable, Equatable, Sendable {
         self.conditions = conditions
         self.observed = observed
         self.refreshRecommended = refreshRecommended
+    }
+}
+
+// MARK: - ReadText (read_text input/output)
+
+/// Byte budget for `read_text` (§ full-text read). Either a positive UTF-8 byte
+/// count or the exact string `"max"` (return the full live `AXValue` string).
+public enum ReadTextLimit: Codable, Equatable, Sendable {
+    /// Positive UTF-8 byte budget. Truncation never splits a Swift `Character`
+    /// (extended grapheme cluster).
+    case bytes(Int)
+    /// Return the entire live string value with no byte budget.
+    case max
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let int = try? container.decode(Int.self) {
+            guard int > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "read_text limit integer must be > 0"
+                )
+            }
+            self = .bytes(int)
+            return
+        }
+        if let string = try? container.decode(String.self) {
+            guard string == "max" else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "read_text limit string must be exactly \"max\""
+                )
+            }
+            self = .max
+            return
+        }
+        throw DecodingError.typeMismatch(
+            ReadTextLimit.self,
+            DecodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "read_text limit must be a positive integer or \"max\""
+            )
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case let .bytes(count):
+            try container.encode(count)
+        case .max:
+            try container.encode("max")
+        }
+    }
+}
+
+/// Decoded `read_text` params. Custom `Decodable` applies the protocol default
+/// (`limit` = 4096 bytes) when the key is omitted.
+///
+/// Reads the live `AXValue` of one revision-checked element without advancing the
+/// revision or mutating the session element table. Secure text fields are rejected
+/// before any value is copied.
+public struct ReadTextRequest: Codable, Equatable, Sendable {
+    public var app: String
+    public var sessionId: String
+    public var revision: Int
+    public var elementId: String
+    /// UTF-8 byte budget or `"max"`. Default: 4096 bytes.
+    public var limit: ReadTextLimit
+
+    public static let defaultLimit: ReadTextLimit = .bytes(4096)
+
+    public init(
+        app: String,
+        sessionId: String,
+        revision: Int,
+        elementId: String,
+        limit: ReadTextLimit = ReadTextRequest.defaultLimit
+    ) {
+        self.app = app
+        self.sessionId = sessionId
+        self.revision = revision
+        self.elementId = elementId
+        self.limit = limit
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case app, sessionId, revision, elementId, limit
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.app = try container.decode(String.self, forKey: .app)
+        self.sessionId = try container.decode(String.self, forKey: .sessionId)
+        self.revision = try container.decode(Int.self, forKey: .revision)
+        self.elementId = try container.decode(String.self, forKey: .elementId)
+        self.limit = try container.decodeIfPresent(ReadTextLimit.self, forKey: .limit) ?? Self.defaultLimit
+    }
+}
+
+/// `read_text` result payload:
+/// `{ "text", "totalBytes", "returnedBytes", "truncated" }`.
+///
+/// `totalBytes` is the full live string's UTF-8 length; `returnedBytes` is the
+/// length of `text` after the caller's limit is applied on a Character boundary.
+public struct ReadTextResult: Codable, Equatable, Sendable {
+    public var text: String
+    public var totalBytes: Int
+    public var returnedBytes: Int
+    public var truncated: Bool
+
+    public init(text: String, totalBytes: Int, returnedBytes: Int, truncated: Bool) {
+        self.text = text
+        self.totalBytes = totalBytes
+        self.returnedBytes = returnedBytes
+        self.truncated = truncated
     }
 }
 

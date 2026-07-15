@@ -1,28 +1,32 @@
 {
+  "appBundleName": "Semantouch.app",
   "architectures": [
-    "arm64"
+    "arm64",
+    "x86_64"
   ],
   "bundleId": "tech.watzon.semantouch",
   "bundleIdIsPlaceholder": false,
   "contractVersion": "semantouch/1",
-  "description": "Semantouch provides native macOS computer use: per-window capture (including covered windows), a compact accessibility tree with stable element ids, semantic accessibility actions, incremental tree diffs, guarded native input fallback, and a decorative virtual-cursor overlay — exposed as a stdio MCP server.",
+  "description": "Semantouch provides native macOS computer use via a resident signed Semantouch.app host: per-window capture (including covered windows), a compact accessibility tree with stable element ids, semantic accessibility actions, incremental tree diffs, guarded native input fallback, and a decorative virtual-cursor overlay — exposed through a nested stdio MCP relay. TCC grants (Accessibility, Screen Recording) are owned by the signed Semantouch.app host (bundle id tech.watzon.semantouch, executable SemantouchHost). The nested Contents/MacOS/semantouch relay is stdio/control only and does not hold TCC.",
   "displayName": "Semantouch",
+  "hostExecutableName": "SemantouchHost",
   "manifestVersion": 1,
   "mcpProtocolVersion": "2025-06-18",
-  "minimumMacOS": "14.4",
+  "minimumMacOS": "14.0",
   "name": "semantouch",
   "permissions": [
     {
       "key": "accessibility",
-      "reason": "Read the accessibility tree of the target window and perform semantic AX actions.",
+      "reason": "Granted to Semantouch.app (tech.watzon.semantouch / SemantouchHost). The resident app host reads the accessibility tree and performs semantic AX actions; the nested Contents/MacOS/semantouch relay does not hold Accessibility TCC.",
       "required": true
     },
     {
       "key": "screenRecording",
-      "reason": "Capture a still image of the target window (including a covered/background window) via ScreenCaptureKit.",
+      "reason": "Granted to Semantouch.app (tech.watzon.semantouch / SemantouchHost). The resident app host captures still images via ScreenCaptureKit; the nested Contents/MacOS/semantouch relay does not hold Screen Recording TCC.",
       "required": true
     }
   ],
+  "relayExecutableName": "semantouch",
   "server": {
     "args": [
       "mcp"
@@ -30,6 +34,8 @@
     "command": "/Applications/Semantouch.app/Contents/MacOS/semantouch",
     "type": "stdio"
   },
+  "tccOwnership": "TCC grants (Accessibility, Screen Recording) are owned by the signed Semantouch.app host (bundle id tech.watzon.semantouch, executable SemantouchHost). The nested Contents/MacOS/semantouch relay is stdio/control only and does not hold TCC.",
+  "teamIdentifier": "MB5789APU7",
   "tools": [
     {
       "name": "doctor",
@@ -40,7 +46,15 @@
       "phase": 1
     },
     {
+      "name": "launch_app",
+      "phase": 1
+    },
+    {
       "name": "get_app_state",
+      "phase": 1
+    },
+    {
+      "name": "read_text",
       "phase": 1
     },
     {
@@ -88,5 +102,5 @@
       "phase": 4
     }
   ],
-  "version": "0.2.1"
+  "version": "0.3.0"
 }

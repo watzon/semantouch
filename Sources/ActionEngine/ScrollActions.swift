@@ -16,18 +16,19 @@ public enum ScrollActions {
         _ element: ActionElement,
         direction: ScrollDirection,
         by granularity: ScrollGranularity,
-        count: Int,
+        count: Double,
         elementId: String
     ) throws -> ActionResult {
-        let steps = max(1, count)
+        // Positive magnitude; callers/schema enforce > 0.
+        let magnitude = max(0, count)
 
-        // 1. Settable scrollbar AXValue (a 0…1 fraction).
+        // 1. Settable scrollbar AXValue (a 0…1 fraction). Fractional count is exact here.
         if let bar = element.element(for: direction.scrollBarAttribute),
            bar.isSettable(AXActionName.value),
            let currentString = bar.snapshot(AXActionName.value),
            let current = Double(currentString) {
-            let magnitude = (granularity == .page ? pageFraction : lineFraction) * Double(steps)
-            let delta = direction.increasesValue ? magnitude : -magnitude
+            let unit = granularity == .page ? pageFraction : lineFraction
+            let delta = (direction.increasesValue ? unit : -unit) * magnitude
             let next = min(1.0, max(0.0, current + delta))
             try bar.writeValue(.number(next))
             let after = bar.snapshot(AXActionName.value).flatMap(Double.init) ?? next
@@ -38,12 +39,34 @@ public enum ScrollActions {
         }
 
         // 2. By-page scroll action on the scroll area.
+        // Discrete AX actions cannot express fractions: ceil the magnitude and report
+        // the approximation when the requested count was non-integral or when line
+        // granularity is approximated by a page action.
         let actions = element.actionNames()
         if actions.contains(direction.byPageActionName) {
-            for _ in 0..<steps { try element.perform(direction.byPageActionName) }
-            let warning = granularity == .line
-                ? "scrolled via \(direction.byPageActionName) (page granularity; line approximated)"
-                : "scrolled via \(direction.byPageActionName)"
+            let discreteSteps = max(1, Int(magnitude.rounded(.up)))
+            for _ in 0..<discreteSteps {
+                try element.perform(direction.byPageActionName)
+            }
+            var detail: [String] = []
+            if granularity == .line {
+                detail.append("page granularity; line approximated")
+            }
+            if magnitude != Double(discreteSteps) {
+                detail.append(
+                    String(
+                        format: "count %.4g approximated as %d discrete page action(s)",
+                        magnitude,
+                        discreteSteps
+                    )
+                )
+            }
+            let warning: String
+            if detail.isEmpty {
+                warning = "scrolled via \(direction.byPageActionName)"
+            } else {
+                warning = "scrolled via \(direction.byPageActionName) (\(detail.joined(separator: "; ")))"
+            }
             return SemanticActions.completed(stateChanged: false, warning: warning)
         }
 

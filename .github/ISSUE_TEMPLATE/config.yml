@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/watzon/semantouch/blob/main/docs/OVERVIEW.md
+    about: Start with the getting-started overview before filing an issue.
+  - name: Security model
+    url: https://github.com/watzon/semantouch/blob/main/docs/SECURITY.md
+    about: Review permission, denylist, and prompt-injection rules.
+  - name: DeepWiki
+    url: https://deepwiki.com/watzon/semantouch
+    about: Browse AI-generated repository documentation.

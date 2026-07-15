@@ -1,0 +1,64 @@
+name: Linux / Wayland capability
+description: Linux X11/AT-SPI or Wayland compositor capability, capture/input limits, or session discovery issues.
+title: "Linux: "
+labels: ["bug", "linux"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Linux is planned. Wayland remains compositor-capability-gated. Prefer typed capability results over black frames or false success. Redact secrets.
+  - type: dropdown
+    id: display_server
+    attributes:
+      label: Display server
+      options:
+        - X11
+        - Wayland
+        - mixed / nested
+        - unknown
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop / compositor
+      placeholder: "GNOME 48 + Mutter, KDE Plasma + KWin, Sway, etc."
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+      placeholder: "Ubuntu 24.04, Fedora 42, Arch, ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - x86_64
+        - aarch64
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: portals
+    attributes:
+      label: Portal / accessibility / capture evidence
+      description: AT-SPI availability, xdg-desktop-portal version, PipeWire capture, input method, seat/session details that matter.
+    validations:
+      required: true
+  - type: textarea
+    id: capability
+    attributes:
+      label: Capability results
+      description: Which tools can observe/act, which are blocked, and the exact typed error or capability code if present.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps or design notes
+    validations:
+      required: true

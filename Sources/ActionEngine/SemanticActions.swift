@@ -2,13 +2,20 @@ import Foundation
 import ComputerUseCore
 
 /// `click` and `perform_action`: activation through native AX **actions** (§13.3
-/// step 1). Neither ever synthesizes input; an element that does not advertise the
-/// requested action yields `unsupported_action`.
+/// step 1). Ordinary left single/multi clicks stay on the AXPress path; right /
+/// middle and any click that needs pointer semantics are routed by the executor
+/// through the element's verified frame (never a bare invented coordinate).
 public enum SemanticActions {
     /// `click` — the element's primary activation, mapped to `AXPress` in Phase 2.
     /// An element without `AXPress` → `unsupported_action` (`data.supported` = its
-    /// raw action names). A coordinate-based click is Phase 4 and unreachable here.
-    public static func click(_ element: ActionElement, elementId: String) throws -> ActionResult {
+    /// raw action names). Repeated ordinary left clicks re-perform AXPress
+    /// `clickCount` times (1...3). Right/middle and pointer-semantic forms never
+    /// reach here — the executor routes those through verified-frame delivery.
+    public static func click(
+        _ element: ActionElement,
+        elementId: String,
+        clickCount: Int = 1
+    ) throws -> ActionResult {
         let actions = element.actionNames()
         guard actions.contains(AXActionName.press) else {
             throw CUError.unsupportedAction(
@@ -18,10 +25,19 @@ public enum SemanticActions {
                 reason: "click maps to AXPress, which this element does not expose."
             )
         }
+        let units = max(1, min(3, clickCount))
         let before = element.snapshot(AXActionName.value)
-        try element.perform(AXActionName.press)
+        for _ in 0..<units {
+            try element.perform(AXActionName.press)
+        }
         let after = element.snapshot(AXActionName.value)
         return Self.completed(stateChanged: stateDidChange(before: before, after: after))
+    }
+
+    /// Whether a semantic element click can stay on the pure AXPress path.
+    /// Ordinary left clicks (any count 1...3) do; right/middle need pointer semantics.
+    public static func usesAXPress(button: PointerButton) -> Bool {
+        button == .left
     }
 
     /// `perform_action` — perform a named AX action after validating it against the

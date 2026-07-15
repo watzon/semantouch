@@ -1,43 +1,93 @@
 #!/bin/sh
+# Sign Semantouch.app inside-out with Developer ID + Hardened Runtime + timestamp.
+# Never uses codesign --deep for signing. Nested relay first, then outer app.
+#
+# Usage:
+#   scripts/sign-release /path/to/Semantouch.app 'Developer ID Application: Name (TEAMID)'
 set -eu
 
 if [ "$#" -ne 2 ]; then
-  printf '%s\n' "usage: $0 /path/to/semantouch 'Developer ID Application: Name (TEAMID)'" >&2
+  printf '%s\n' "usage: $0 /path/to/Semantouch.app 'Developer ID Application: Name (TEAMID)'" >&2
   exit 2
 fi
 
-binary=$1
+app_path=$1
 identity=$2
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 entitlements="$project_root/packaging/Release.entitlements"
 
-if [ ! -f "$binary" ]; then
-  printf '%s\n' "semantouch: release binary not found: $binary" >&2
+expected_bundle_id="tech.watzon.semantouch"
+expected_relay_id="tech.watzon.semantouch.cli"
+expected_team="MB5789APU7"
+expected_authority="Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
+expected_executable="SemantouchHost"
+expected_relay="semantouch"
+
+die() {
+  printf '%s\n' "sign-release: $*" >&2
   exit 1
+}
+
+if [ ! -d "$app_path" ]; then
+  die "app bundle not found: $app_path"
 fi
+
+case $(basename -- "$app_path") in
+  Semantouch.app) ;;
+  *)
+    die "expected bundle named Semantouch.app (got: $(basename -- "$app_path"))"
+    ;;
+esac
+
+if [ ! -f "$entitlements" ]; then
+  die "entitlements missing: $entitlements"
+fi
+
+relay_bin="$app_path/Contents/MacOS/$expected_relay"
+host_bin="$app_path/Contents/MacOS/$expected_executable"
+
+if [ ! -f "$relay_bin" ]; then
+  die "nested relay missing: $relay_bin"
+fi
+if [ ! -f "$host_bin" ]; then
+  die "host executable missing: $host_bin"
+fi
+
+# Inside-out, never --deep: nested relay first, then outer app (covers host).
+/usr/bin/codesign \
+  --force \
+  --options runtime \
+  --timestamp \
+  --identifier "$expected_relay_id" \
+  --entitlements "$entitlements" \
+  --sign "$identity" \
+  "$relay_bin"
 
 /usr/bin/codesign \
   --force \
   --options runtime \
   --timestamp \
-  --identifier tech.watzon.semantouch \
+  --identifier "$expected_bundle_id" \
   --entitlements "$entitlements" \
   --sign "$identity" \
-  "$binary"
+  "$app_path"
 
-/usr/bin/codesign --verify --strict --verbose=2 "$binary"
-signature_details=$(/usr/bin/codesign --display --verbose=4 "$binary" 2>&1)
+# Verify via the dedicated contract checker (universal2 + identity).
+"$script_dir/verify-app-release" "$app_path"
+
+# Extra identity sanity from the outer bundle display.
+signature_details=$(/usr/bin/codesign --display --verbose=4 "$app_path" 2>&1)
 printf '%s\n' "$signature_details" >&2
 
 identifier=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^Identifier=/ { print $2; exit }')
 team_identifier=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^TeamIdentifier=/ { print $2; exit }')
 authority=$(printf '%s\n' "$signature_details" | /usr/bin/awk -F= '/^Authority=/ { print $2; exit }')
 
-if [ "$identifier" != "tech.watzon.semantouch" ] \
-  || [ "$team_identifier" != "MB5789APU7" ] \
-  || [ "$authority" != "Developer ID Application: Watzon Ventures LLc (MB5789APU7)" ]; then
-  printf '%s\n' \
-    "semantouch: unexpected signing identity: identifier=$identifier team=$team_identifier authority=$authority" >&2
-  exit 1
+if [ "$identifier" != "$expected_bundle_id" ] \
+  || [ "$team_identifier" != "$expected_team" ] \
+  || [ "$authority" != "$expected_authority" ]; then
+  die "unexpected signing identity: identifier=$identifier team=$team_identifier authority=$authority"
 fi
+
+printf '%s\n' "sign-release: signed $app_path with $identity"

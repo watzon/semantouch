@@ -1,0 +1,209 @@
+/* Semantouch demo — shared frame furniture (Cobalt Grid brand remap).
+   Colors from frame.md frontmatter. Loaded by each sub-composition. */
+
+:root {
+  --paper: #f2efe5;
+  --paper-2: #4df545;
+  --ink: #173d2a;
+  --ink-soft: #4df545;
+  --grid: rgba(77, 245, 69, 0.1);
+  --ink-faint: rgba(77, 245, 69, 0.18);
+  --font-display: "Newsreader", "Times New Roman", serif;
+  --font-body: "Hanken Grotesk", "Helvetica Neue", sans-serif;
+  --font-mono: "DM Mono", "SF Mono", ui-monospace, monospace;
+}
+
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: local("Newsreader"), local("Newsreader-Regular");
+}
+
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: local("Hanken Grotesk"), local("HankenGrotesk-Regular");
+}
+
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: local("Hanken Grotesk SemiBold"), local("HankenGrotesk-SemiBold");
+}
+
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: local("DM Mono"), local("DMMono-Regular");
+}
+
+#root {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-body);
+  container-type: size;
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 2cqw 2cqw;
+  background-position: 0 0;
+}
+
+.frame-fill {
+  position: absolute;
+  inset: 0;
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 38.4px 38.4px;
+}
+
+.hairline-top,
+.hairline-bottom {
+  position: absolute;
+  left: 4cqw;
+  right: 4cqw;
+  height: 0;
+  border-top: 0.12cqw solid var(--ink);
+  pointer-events: none;
+}
+.hairline-top {
+  top: 3cqw;
+}
+.hairline-bottom {
+  bottom: 3cqw;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.micro {
+  font-family: var(--font-body);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.display {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.005em;
+  line-height: 0.95;
+  color: var(--ink);
+}
+
+.body {
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.verified {
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ledger {
+  display: grid;
+  gap: 0;
+  border-top: 0.12cqw solid var(--ink);
+}
+.ledger-row {
+  display: grid;
+  grid-template-columns: 8cqw 1fr 1.2fr 14cqw;
+  gap: 1.5cqw;
+  align-items: baseline;
+  padding: 0.7cqw 0;
+  border-bottom: 0.06cqw solid var(--ink-faint);
+}
+.ledger-row.header {
+  border-bottom: 0.12cqw solid var(--ink);
+  padding-bottom: 0.9cqw;
+}
+
+.qr-block {
+  width: 5.5cqw;
+  height: 5.5cqw;
+  background:
+    linear-gradient(90deg, var(--ink) 12.5%, transparent 12.5%) 0 0 / 25% 25%,
+    linear-gradient(var(--ink) 12.5%, transparent 12.5%) 0 0 / 25% 25%,
+    var(--paper);
+  box-shadow: 0 0 0 0.12cqw var(--paper);
+  border: 0.12cqw solid var(--ink);
+}
+
+.cursor {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  pointer-events: none;
+  z-index: 50;
+}
+.cursor svg {
+  display: block;
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+}
+
+.panel {
+  position: absolute;
+  border: 0.08cqw solid var(--ink);
+  background: rgba(242, 239, 229, 0.92);
+}
+
+.caption-line {
+  font-family: var(--font-body);
+  font-size: 1.35cqw;
+  line-height: 1.4;
+  max-width: 70cqw;
+  color: var(--ink);
+}
+
+.stamp {
+  display: inline-block;
+  border: 0.14cqw solid var(--ink-soft);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.45cqw 0.9cqw;
+  font-size: 0.95cqw;
+}
+
+.crossout {
+  text-decoration: line-through;
+  opacity: 0.45;
+}
+
+.safe {
+  position: absolute;
+  left: 4cqw;
+  right: 4cqw;
+  top: 5.5cqw;
+  bottom: 5.5cqw;
+}

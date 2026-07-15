@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>01-hook</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #173d2a;
+          font-family: sans-serif;
+          background-color: #f2efe5;
+          background-image:
+            linear-gradient(rgba(77, 245, 69, 0.1) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(77, 245, 69, 0.1) 1px, transparent 1px);
+          background-size: 38.4px 38.4px;
+        }
+        .hairline {
+          position: absolute;
+          left: 76.8px;
+          right: 76.8px;
+          border-top: 2.3px solid #173d2a;
+        }
+        .hairline.top {
+          top: 57.6px;
+        }
+        .hairline.bottom {
+          bottom: 57.6px;
+        }
+        .meta {
+          position: absolute;
+          top: 86px;
+          left: 96px;
+          font-family: monospace;
+          font-size: 13px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .headline {
+          position: absolute;
+          top: 220px;
+          left: 96px;
+          right: 420px;
+          font-family: serif;
+          font-weight: 400;
+          font-size: 96px;
+          line-height: 0.95;
+          letter-spacing: -0.008em;
+          max-width: 1320px;
+        }
+        .headline .line {
+          display: block;
+          opacity: 0;
+          transform: translateY(28px);
+        }
+        .ledger {
+          position: absolute;
+          left: 96px;
+          right: 96px;
+          bottom: 110px;
+          display: grid;
+          grid-template-columns: 1.1fr 1fr 1.2fr 0.7fr;
+          gap: 24px;
+          border-top: 2.3px solid #173d2a;
+          padding-top: 18px;
+          font-family: monospace;
+          font-size: 14px;
+          letter-spacing: 0.04em;
+        }
+        .ledger .k {
+          display: block;
+          opacity: 0.55;
+          font-size: 12px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          margin-bottom: 8px;
+          font-family: sans-serif;
+          font-weight: 600;
+        }
+        .stamp {
+          border: 2px solid #4df545;
+          color: #1f6b1c;
+          display: inline-block;
+          padding: 8px 14px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          font-size: 14px;
+        }
+        .qr {
+          position: absolute;
+          top: 96px;
+          right: 96px;
+          width: 88px;
+          height: 88px;
+          border: 2px solid #173d2a;
+          background:
+            linear-gradient(90deg, #173d2a 12%, transparent 12%) 0 0 / 25% 25%,
+            linear-gradient(#173d2a 12%, transparent 12%) 0 0 / 25% 25%,
+            #f2efe5;
+        }
+        .cursor {
+          position: absolute;
+          width: 28px;
+          height: 28px;
+          left: 420px;
+          top: 360px;
+          opacity: 0;
+        }
+      </style>
+
+      <div id="root" data-composition-id="01-hook" data-width="1920" data-height="1080" data-duration="4">
+        <div class="hairline top" id="h1-top"></div>
+        <div class="hairline bottom" id="h1-bottom"></div>
+        <div class="meta" id="h1-meta">SEMANTOUCH / EVIDENCE RUN</div>
+        <div class="qr" id="h1-qr" aria-hidden="true"></div>
+        <h1 class="headline" id="h1-title">
+          <span class="line" id="h1-l1">Computer use,</span>
+          <span class="line" id="h1-l2">with receipts.</span>
+        </h1>
+        <div class="ledger" id="h1-ledger">
+          <div>
+            <span class="k">Run</span>
+            <span id="h1-run">—</span>
+          </div>
+          <div>
+            <span class="k">Release</span>
+            <span id="h1-ver">—</span>
+          </div>
+          <div>
+            <span class="k">Fixture</span>
+            <span id="h1-fix">—</span>
+          </div>
+          <div>
+            <span class="k">Status</span>
+            <span class="stamp" id="h1-stamp">—</span>
+          </div>
+        </div>
+        <div class="cursor" id="h1-cursor">
+          <svg viewBox="0 0 28 28" width="28" height="28">
+            <path
+              d="M4 3 L4 22 L9.5 16.5 L13 24 L16 22.5 L12.5 15 L20 15 Z"
+              fill="#4DF545"
+              stroke="#173D2A"
+              stroke-width="1.2"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+      </div>
+
+      <script>
+        (function () {
+          const E = window.__SemantouchDemo;
+          const step = E.frameById("01-hook");
+          const evidence = E.getEvidence();
+          E.text(document.getElementById("h1-run"), evidence.runId);
+          E.text(document.getElementById("h1-ver"), "v" + E.claim(step, "packageVersion"));
+          E.text(document.getElementById("h1-fix"), E.claim(step, "fixtureId").split("@")[0]);
+          E.text(
+            document.getElementById("h1-stamp"),
+            E.claim(step, "verified") ? "VERIFIED" : "UNVERIFIED",
+          );
+
+          window.__timelines = window.__timelines || {};
+          const tl = gsap.timeline({ paused: true });
+          tl.fromTo("#h1-top", { scaleX: 0, transformOrigin: "left center" }, { scaleX: 1, duration: 0.55, ease: "power3.out" }, 0.05);
+          tl.fromTo("#h1-bottom", { scaleX: 0, transformOrigin: "right center" }, { scaleX: 1, duration: 0.55, ease: "power3.out" }, 0.12);
+          tl.fromTo("#h1-meta", { opacity: 0, y: -10 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, 0.2);
+          tl.fromTo("#h1-qr", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 0.35);
+          tl.fromTo("#h1-l1", { opacity: 0, y: 28 }, { opacity: 1, y: 0, duration: 0.7, ease: "power3.out" }, 1.3);
+          tl.fromTo("#h1-l2", { opacity: 0, y: 28 }, { opacity: 1, y: 0, duration: 0.7, ease: "power3.out" }, 1.55);
+          tl.fromTo("#h1-cursor", { opacity: 0, x: -40, y: 20 }, { opacity: 1, x: 280, y: -8, duration: 1.0, ease: "power2.inOut" }, 1.7);
+          tl.fromTo("#h1-ledger", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.55, ease: "power2.out" }, 2.85);
+          // hold still through end
+          window.__timelines["01-hook"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>

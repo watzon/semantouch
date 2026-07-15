@@ -3,6 +3,10 @@ import Dispatch
 import CoreGraphics
 import ComputerUseCore
 
+// AccessibilityEngine is not imported here: optional AX reliability seams
+// (`CoordinateClickResolving`, `FocusedElementProviding`, `StringAXValueCapable`)
+// live in FallbackInput so the executor stays free of live AX types.
+
 // MARK: - Value + action models
 
 /// A scalar an action may write (`set_value`, scrollbar `AXValue`). Mirrors
@@ -46,18 +50,25 @@ public enum ScrollGranularity: String, Equatable, Sendable {
 
 /// One element-targeted Phase 2 action with its parameters.
 public enum SemanticAction: Equatable, Sendable {
+    /// Ordinary left single-click: maps to one `AXPress`.
     case click
+    /// Ordinary left multi-click (2 or 3): repeats `AXPress` `count` times. Right/middle
+    /// never reach this case — the handler routes them through verified-frame pointer delivery.
+    case clickRepeated(count: Int)
     case performAction(name: String)
     /// `set_value`. v1.5 (§18.5): `commit` requests the semantic commit path — best-effort
     /// pre-focus, write, then `AXConfirm` when advertised (never synthesized input).
     case setValue(ActionValue, commit: Bool)
     case selectText(start: Int, length: Int)
-    case scroll(direction: ScrollDirection, by: ScrollGranularity, count: Int)
+    /// Semantic scroll. `count` is a positive magnitude; fractional values are exact on
+    /// settable scrollbar AXValue paths and approximated (with a warning) for discrete
+    /// AX page actions.
+    case scroll(direction: ScrollDirection, by: ScrollGranularity, count: Double)
 
     /// The wire tool name (used for `policy_denied.data.tool`).
     public var toolName: String {
         switch self {
-        case .click: return "click"
+        case .click, .clickRepeated: return "click"
         case .performAction: return "perform_action"
         case .setValue: return "set_value"
         case .selectText: return "select_text"
@@ -279,7 +290,9 @@ public final class ActionExecutor: @unchecked Sendable {
         // Dispatch to the semantic action implementation.
         switch action {
         case .click:
-            return try SemanticActions.click(element, elementId: target.elementId)
+            return try SemanticActions.click(element, elementId: target.elementId, clickCount: 1)
+        case let .clickRepeated(count):
+            return try SemanticActions.click(element, elementId: target.elementId, clickCount: count)
         case let .performAction(name):
             return try SemanticActions.performNamed(element, name: name, elementId: target.elementId)
         case let .setValue(value, commit):
@@ -368,32 +381,164 @@ public extension ActionExecutor {
 
         // Map coordinate actions to global points BEFORE any focus change, so an unmappable
         // coordinate fails without disturbing the user's foreground.
-        let resolved = try resolveGlobal(action, target: target, environment: environment)
+        var resolved = try resolveGlobal(action, target: target, environment: environment)
 
-        // Interference decision (§16). No silent escalation: background-only + not-frontmost
-        // is a clean `focus_required`, never input to the wrong app.
-        let targetIsFrontmost = environment.workspace.frontmostPID == targetPID
-        let plan = InterferencePlan.decide(mode: target.interference, targetIsFrontmost: targetIsFrontmost)
-        if plan == .focusRequired {
-            throw CUError.focusRequired(app: target.app, frontmostApp: environment.workspace.frontmostAppName)
-        }
-
-        // Arm interruption around the whole transaction (record → activate → deliver → restore).
+        // Arm interruption around optional AX reliability work AND any subsequent synthesis.
         let monitor = environment.interruption
         monitor.arm()
         defer { monitor.disarm() }
 
+        // §18.6: `elementFocused` is reported only when an element was targeted; it defaults to
+        // `false` (unconfirmed / never attempted, e.g. a focus-changing mode that could not
+        // foreground the target) and becomes the confirm re-read's result when delivery runs.
+        var elementFocused: Bool? = target.targetsElement ? false : nil
+
+        // --- type_text: settable string AXValue append-first (before CGEvent planning) -----
+        if case let .text(text) = resolved {
+            if let axValueResult = tryAppendStringAXValue(
+                text: text,
+                focusElement: focusElement,
+                targetPID: targetPID,
+                target: target,
+                environment: environment,
+                monitor: monitor
+            ) {
+                return axValueResult
+            }
+        }
+
+        // --- left single coordinate click: optional AX resolve / press before interference ---
+        // Right/middle/multi-click keep exact pointer semantics (no semantic AX).
+        if case let .click(point, button, flags, clickCount) = resolved,
+           button == .left,
+           clickCount == 1,
+           let resolver = environment as? CoordinateClickResolving {
+            let remapped = trySemanticCoordinateClick(
+                originalPoint: point,
+                button: button,
+                flags: flags,
+                clickCount: clickCount,
+                targetPID: targetPID,
+                target: target,
+                environment: environment,
+                resolver: resolver,
+                monitor: monitor
+            )
+            switch remapped {
+            case let .completed(result):
+                return result
+            case let .synthesize(newResolved):
+                resolved = newResolved
+            }
+        }
+
+        if monitor.isInterrupted {
+            return buildResult(
+                action: action,
+                focus: FocusOutcome(
+                    delivered: false,
+                    focusChanged: false,
+                    focusRestored: false,
+                    targetBecameFrontmost: false,
+                    priorFrontmostPID: environment.workspace.frontmostPID
+                ),
+                interrupted: true,
+                focusLost: false,
+                degraded: monitor.degraded,
+                elementFocused: elementFocused
+            )
+        }
+
+        // Interference decision (§16). No silent escalation: background-only + not-frontmost
+        // either takes the process-targeted keyboard lane (eligible keys/text + capable
+        // synthesizer) or rejects with `focus_required` for pointer/ineligible paths — never
+        // global delivery into the wrong app, and never auto-escalation to focus.
         let synthesizer = environment.synthesizer
+        let targetedCapability = synthesizer as? ProcessTargetedInputSynthesizer
+        let targetIsFrontmost = environment.workspace.frontmostPID == targetPID
+        let plan = InterferencePlan.decide(
+            mode: target.interference,
+            targetIsFrontmost: targetIsFrontmost,
+            actionSupportsTargetedDelivery: action.supportsTargetedDelivery,
+            synthesizerSupportsTargetedDelivery: targetedCapability != nil
+        )
+        if plan == .focusRequired {
+            throw CUError.focusRequired(app: target.app, frontmostApp: environment.workspace.frontmostAppName)
+        }
+
+        // Process-targeted keyboard lane: re-resolve/bind the current target PID immediately
+        // before delivery through the existing environment/session ownership checks. No
+        // activation, no FocusTransaction, no global silent fallback. postToPid has no ack, so
+        // delivery is reported unconfirmed unless an existing element-focused postcondition
+        // proves it.
+        if plan == .deliverTargeted {
+            guard let targeted = targetedCapability else {
+                // Capability disappeared between decide and delivery — refuse rather than
+                // silently fall back to global posting into the frontmost app.
+                throw CUError.focusRequired(app: target.app, frontmostApp: environment.workspace.frontmostAppName)
+            }
+            guard let livePID = environment.targetPID(sessionId: target.sessionId),
+                  livePID == targetPID,
+                  (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true else {
+                // Target exited / PID reused / ownership lost after the pre-check — post nothing.
+                return buildResult(
+                    action: action,
+                    focus: FocusOutcome(
+                        delivered: false,
+                        focusChanged: false,
+                        focusRestored: false,
+                        targetBecameFrontmost: false,
+                        priorFrontmostPID: environment.workspace.frontmostPID
+                    ),
+                    interrupted: false,
+                    focusLost: true,
+                    degraded: monitor.degraded,
+                    elementFocused: elementFocused,
+                    targetedDelivery: true,
+                    deliveryConfirmed: false
+                )
+            }
+
+            let deliveryPID = livePID
+            let targetGuard = TargetGuard {
+                guard let current = environment.targetPID(sessionId: target.sessionId),
+                      current == deliveryPID else { return false }
+                return (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true
+            }
+            let bound = ProcessTargetedSynthesizerBinding(base: targeted, pid: deliveryPID)
+            if let focusElement {
+                _ = focusElement.setKeyboardFocus()
+                elementFocused = focusElement.holdsKeyboardFocus()
+            }
+            deliver(resolved, via: bound, interruption: monitor, onTarget: targetGuard)
+
+            let interrupted = monitor.isInterrupted
+            let deliveryConfirmed = (elementFocused == true) && !interrupted && !targetGuard.lostTarget
+            return buildResult(
+                action: action,
+                focus: FocusOutcome(
+                    delivered: true,
+                    focusChanged: false,
+                    focusRestored: false,
+                    targetBecameFrontmost: false,
+                    priorFrontmostPID: environment.workspace.frontmostPID
+                ),
+                interrupted: interrupted,
+                focusLost: targetGuard.lostTarget,
+                degraded: monitor.degraded,
+                elementFocused: elementFocused,
+                targetedDelivery: true,
+                deliveryConfirmed: deliveryConfirmed
+            )
+        }
+
+        // Global / focus-transaction lane (frontmost or explicit focus modes).
         // Re-check the target holds the foreground before EVERY input unit during delivery
         // (§16.3 step 5). A self-activating app steals focus with no HID event, so the
         // interruption monitor cannot see it; this guard stops delivery so remaining keyboard
         // input never lands in the intruder, and pointer input never routes past the target.
         let workspace = environment.workspace
         let targetGuard = TargetGuard { workspace.frontmostPID == targetPID }
-        // §18.6: `elementFocused` is reported only when an element was targeted; it defaults to
-        // `false` (unconfirmed / never attempted, e.g. a focus-changing mode that could not
-        // foreground the target) and becomes the confirm re-read's result when delivery runs.
-        var elementFocused: Bool? = target.targetsElement ? false : nil
         // A coordinate pointer action moves the PHYSICAL cursor (§16.7: public CGEvent
         // delivery routes by screen location). Record where the user's pointer was so it can
         // be returned after delivery — restored only when delivery ran to completion
@@ -430,6 +575,407 @@ public extension ActionExecutor {
         )
     }
 
+    // MARK: - Optional AX reliability (type_text string AXValue + coordinate press)
+
+    /// Outcome of optional semantic coordinate-click resolution.
+    private enum SemanticClickOutcome {
+        /// AXPress (or equivalent semantic path) completed; no CGEvents.
+        case completed(ActionResult)
+        /// Fall through to existing interference + pointer synthesis with this resolved form.
+        case synthesize(ResolvedFallback)
+    }
+
+    /// Attempt left single-click AX resolution/press. On successful press returns a completed
+    /// accessibility result (zero events). On `.coordinate` or press failure, remaps the
+    /// click to the resolver's safe anchor (revalidated against captured+current window
+    /// frames). Resolver miss keeps the original point. Never escalates focus.
+    private static func trySemanticCoordinateClick(
+        originalPoint: CGPoint,
+        button: PointerButton,
+        flags: CGEventFlags,
+        clickCount: Int,
+        targetPID: pid_t,
+        target: FallbackTarget,
+        environment: FallbackEnvironment,
+        resolver: CoordinateClickResolving,
+        monitor: InterruptionMonitoring
+    ) -> SemanticClickOutcome {
+        // Interruption before AX work: report interrupted without synthesis.
+        if monitor.isInterrupted {
+            return .completed(buildSemanticResult(
+                method: .pointer,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: nil,
+                degraded: monitor.degraded
+            ))
+        }
+
+        // Fresh window frame only — the original point already passed captured+current
+        // validation; the resolver needs the live bounds for candidate rejection.
+        guard let windowBounds = environment.currentWindowFrame(sessionId: target.sessionId) else {
+            return .synthesize(.click(point: originalPoint, button: button, flags: flags, clickCount: clickCount))
+        }
+
+        guard let resolution = resolver.resolveCoordinateClick(
+            atGlobal: originalPoint,
+            windowBounds: windowBounds,
+            expectedPID: targetPID
+        ) else {
+            // Resolver miss / unavailable → keep the original coordinate.
+            return .synthesize(.click(point: originalPoint, button: button, flags: flags, clickCount: clickCount))
+        }
+
+        if monitor.isInterrupted {
+            return .completed(buildSemanticResult(
+                method: .pointer,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: semanticClickWarning(reason: resolution.reason, notes: resolution.evidenceNotes, extra: nil),
+                degraded: monitor.degraded
+            ))
+        }
+
+        // Prefer AXPress when the resolver selected press AND delivery-time authorization
+        // passes. `.press` is advisory only — never sufficient by itself.
+        var pressFailed = false
+        if resolution.activation == .press {
+            switch attemptSafeAXPress(
+                resolution: resolution,
+                originalPoint: originalPoint,
+                targetPID: targetPID,
+                target: target,
+                environment: environment,
+                monitor: monitor
+            ) {
+            case let .completed(result):
+                return .completed(result)
+            case .unauthorized, .pressFailed:
+                pressFailed = true
+                // Fall through to the resolver safe anchor.
+            }
+        }
+
+        // Coordinate path: use the resolver's bounded safe anchor when supplied and still
+        // over the target window. Do not silently revert to the original point when the
+        // resolver supplied an anchor that failed revalidation (refuse synthesis instead).
+        // When the resolver did not supply an anchor, keep the original validated point.
+        if let anchor = resolution.anchor {
+            if let deliveryPoint = revalidatedAnchor(
+                anchor,
+                target: target,
+                environment: environment
+            ) {
+                // Re-check identity before entering pointer synthesis path.
+                guard let livePID = environment.targetPID(sessionId: target.sessionId),
+                      livePID == targetPID,
+                      (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true else {
+                    return .completed(buildSemanticResult(
+                        method: .pointer,
+                        status: .interrupted,
+                        stateChanged: false,
+                        targetVerified: false,
+                        warning: semanticClickWarning(
+                            reason: resolution.reason,
+                            notes: resolution.evidenceNotes,
+                            extra: pressFailed
+                                ? "AXPress was not used; target identity changed before pointer fallback."
+                                : "Target identity changed before pointer fallback."
+                        ),
+                        degraded: monitor.degraded
+                    ))
+                }
+                return .synthesize(.click(point: deliveryPoint, button: button, flags: flags, clickCount: clickCount))
+            }
+            // Anchor failed revalidation — do not fall back to the original point.
+            return .completed(buildSemanticResult(
+                method: .pointer,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: semanticClickWarning(
+                    reason: resolution.reason,
+                    notes: resolution.evidenceNotes,
+                    extra: "Resolver anchor is no longer over the target window; no pointer event was posted."
+                ),
+                degraded: monitor.degraded
+            ))
+        }
+
+        // No anchor from resolver: preserve original validated point.
+        return .synthesize(.click(point: originalPoint, button: button, flags: flags, clickCount: clickCount))
+    }
+
+    private enum AXPressAttempt {
+        case completed(ActionResult)
+        case unauthorized
+        case pressFailed
+    }
+
+    /// Re-check target PID/ownership and selected element PID/frame, then perform AXPress.
+    /// Authorization requires: selected PID present and == targetPID, selected frame present
+    /// and fully inside the **fresh** target window, and frame contains the original
+    /// validated global click point. API success alone does not set `stateChanged`.
+    private static func attemptSafeAXPress(
+        resolution: AXCoordinateClickResolution,
+        originalPoint: CGPoint,
+        targetPID: pid_t,
+        target: FallbackTarget,
+        environment: FallbackEnvironment,
+        monitor: InterruptionMonitoring
+    ) -> AXPressAttempt {
+        // Target identity must still match immediately before press.
+        guard let livePID = environment.targetPID(sessionId: target.sessionId),
+              livePID == targetPID,
+              (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true else {
+            return .unauthorized
+        }
+        // Require a known-equal PID (never press when pid is unknown).
+        guard let selectedPID = resolution.selectedPID, selectedPID == targetPID else {
+            return .unauthorized
+        }
+        // Fresh window only; frame fully inside; frame contains the original click point.
+        guard let windowBounds = environment.currentWindowFrame(sessionId: target.sessionId),
+              let frame = resolution.selectedFrame,
+              frameFullyInside(frame, window: windowBounds),
+              frame.contains(x: Double(originalPoint.x), y: Double(originalPoint.y)) else {
+            return .unauthorized
+        }
+        guard let element = resolution.pressElement, element.isLive else {
+            return .unauthorized
+        }
+        if monitor.isInterrupted {
+            return .completed(buildSemanticResult(
+                method: .accessibility,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: semanticClickWarning(reason: resolution.reason, notes: resolution.evidenceNotes, extra: nil),
+                degraded: monitor.degraded
+            ))
+        }
+
+        do {
+            try element.perform(AXActionName.press)
+        } catch {
+            return .pressFailed
+        }
+
+        // AXPress API success is not an observed UI state change.
+        let status: ActionStatus = monitor.isInterrupted ? .interrupted : .completed
+        return .completed(buildSemanticResult(
+            method: .accessibility,
+            status: status,
+            stateChanged: false,
+            targetVerified: true,
+            warning: semanticClickWarning(reason: resolution.reason, notes: resolution.evidenceNotes, extra: nil),
+            degraded: monitor.degraded
+        ))
+    }
+
+    /// Revalidate a resolver anchor against captured + **fresh** current window frames.
+    /// Returns `nil` when the anchor is no longer safe (caller must not post a pointer event).
+    private static func revalidatedAnchor(
+        _ anchor: Point,
+        target: FallbackTarget,
+        environment: FallbackEnvironment
+    ) -> CGPoint? {
+        let point = CGPoint(x: anchor.x, y: anchor.y)
+        guard let geometry = environment.windowGeometry(sessionId: target.sessionId),
+              let current = environment.currentWindowFrame(sessionId: target.sessionId) else {
+            return nil
+        }
+        guard geometry.framePoints.contains(x: Double(point.x), y: Double(point.y)),
+              current.contains(x: Double(point.x), y: Double(point.y)) else {
+            return nil
+        }
+        return point
+    }
+
+    private static func frameFullyInside(_ frame: Rect, window: Rect) -> Bool {
+        frame.x >= window.x
+            && frame.y >= window.y
+            && (frame.x + frame.width) <= (window.x + window.width)
+            && (frame.y + frame.height) <= (window.y + window.height)
+    }
+
+    private static func semanticClickWarning(
+        reason: String,
+        notes: [String],
+        extra: String?
+    ) -> String {
+        var parts = ["Semantic AX click via \(reason)."]
+        if !notes.isEmpty {
+            parts.append("Evidence: \(notes.joined(separator: ", ")).")
+        }
+        if let extra { parts.append(extra) }
+        return parts.joined(separator: " ")
+    }
+
+    /// Append `text` via settable string AXValue on the explicitly targeted element, or the
+    /// target PID's currently focused element (only when no element was explicitly targeted).
+    ///
+    /// After every write attempt — including a thrown write — re-read and classify:
+    /// - exact expected → confirmed semantic completion (never synthesize)
+    /// - exact original → safe to synthesize the full request
+    /// - anything else / unreadable → indeterminate; attempt rollback to original; only
+    ///   synthesize if rollback re-read confirms original; otherwise interrupted, no synth
+    private static func tryAppendStringAXValue(
+        text: String,
+        focusElement: ActionElement?,
+        targetPID: pid_t,
+        target: FallbackTarget,
+        environment: FallbackEnvironment,
+        monitor: InterruptionMonitoring
+    ) -> ActionResult? {
+        if monitor.isInterrupted {
+            return buildSemanticResult(
+                method: .keyboard,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: nil,
+                degraded: monitor.degraded
+            )
+        }
+
+        // Re-check target identity before any AX write.
+        guard let livePID = environment.targetPID(sessionId: target.sessionId),
+              livePID == targetPID,
+              (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true else {
+            return nil
+        }
+
+        // Explicit target: only that element. Never substitute the app-focused element.
+        // Untargeted: only the target application's currently focused element.
+        let candidate: ActionElement?
+        if target.targetsElement {
+            candidate = focusElement
+        } else if let provider = environment as? FocusedElementProviding {
+            candidate = provider.focusedElement(forPID: targetPID)
+        } else {
+            candidate = nil
+        }
+        guard let element = candidate, element.isLive else { return nil }
+
+        // Typed string capability — never use snapshot (stringifies numbers/bools).
+        guard let stringCapable = element as? StringAXValueCapable,
+              stringCapable.canSetStringAXValue(),
+              let original = stringCapable.stringAXValue() else {
+            return nil
+        }
+
+        if monitor.isInterrupted {
+            return buildSemanticResult(
+                method: .keyboard,
+                status: .interrupted,
+                stateChanged: false,
+                targetVerified: false,
+                warning: nil,
+                degraded: monitor.degraded
+            )
+        }
+
+        // Re-check identity immediately before the mutating write.
+        guard let livePID2 = environment.targetPID(sessionId: target.sessionId),
+              livePID2 == targetPID,
+              (try? environment.sessionOwnedByApp(sessionId: target.sessionId, app: target.app)) == true else {
+            return nil
+        }
+
+        let expected = original + text
+        var writeFaulted = false
+        do {
+            try stringCapable.writeStringAXValue(expected)
+        } catch {
+            writeFaulted = true
+        }
+
+        // Always re-read after an attempted write (including throws).
+        let after = stringCapable.stringAXValue()
+
+        if let after, after == expected {
+            // Confirmed expected value — never synthesize (would double-append).
+            var warning = "Typed via settable AXValue append (confirmed)."
+            if writeFaulted {
+                warning = "AXValue write reported a fault but the re-read confirmed the appended value; no synthesized input was posted."
+            }
+            return buildSemanticResult(
+                method: .accessibility,
+                status: monitor.isInterrupted ? .interrupted : .completed,
+                stateChanged: after != original,
+                targetVerified: true,
+                warning: warning,
+                degraded: monitor.degraded
+            )
+        }
+
+        if let after, after == original {
+            // Exact original — safe to synthesize the full request.
+            return nil
+        }
+
+        // Indeterminate / partial / unreadable. Try rollback to original before any synthesis.
+        if monitor.isInterrupted {
+            return buildSemanticResult(
+                method: .accessibility,
+                status: .interrupted,
+                stateChanged: after.map { $0 != original } ?? true,
+                targetVerified: false,
+                warning: "AXValue post-state is indeterminate after interruption; synthesized input was skipped to avoid double-append.",
+                degraded: monitor.degraded
+            )
+        }
+
+        // Attempt rollback to the exact original value.
+        do {
+            try stringCapable.writeStringAXValue(original)
+        } catch {
+            // Rollback write faulted — still re-read below.
+        }
+        if let rolled = stringCapable.stringAXValue(), rolled == original {
+            // Rollback confirmed — safe to synthesize the full request once.
+            return nil
+        }
+
+        // Rollback failed or unreadable — never synthesize.
+        return buildSemanticResult(
+            method: .accessibility,
+            status: .interrupted,
+            stateChanged: true,
+            targetVerified: false,
+            warning: "AXValue post-state is indeterminate and could not be restored to the original value; synthesized input was skipped to avoid double-append or clobbering concurrent edits.",
+            degraded: monitor.degraded
+        )
+    }
+
+    private static func buildSemanticResult(
+        method: ActionMethod,
+        status: ActionStatus,
+        stateChanged: Bool,
+        targetVerified: Bool,
+        warning: String?,
+        degraded: Bool
+    ) -> ActionResult {
+        var notes: [String] = []
+        if let warning, !warning.isEmpty { notes.append(warning) }
+        if degraded {
+            notes.append("User-interruption monitoring is unavailable; physical input may not cancel this action.")
+        }
+        return ActionResult(
+            status: status,
+            method: method,
+            stateChanged: stateChanged,
+            refreshRecommended: true,
+            warning: notes.isEmpty ? nil : notes.joined(separator: " "),
+            focusChanged: false,
+            focusRestored: false,
+            targetVerified: targetVerified
+        )
+    }
+
     // MARK: - Coordinate resolution
 
     /// The delivery-ready form of a fallback action, with coordinate points already mapped
@@ -437,7 +983,7 @@ public extension ActionExecutor {
     private enum ResolvedFallback {
         case keys([KeyChord])
         case text(String)
-        case click(point: CGPoint, button: PointerButton, flags: CGEventFlags)
+        case click(point: CGPoint, button: PointerButton, flags: CGEventFlags, clickCount: Int)
         case drag(from: CGPoint, to: CGPoint, button: PointerButton, flags: CGEventFlags)
         case scroll(point: CGPoint, deltaX: Int32, deltaY: Int32, flags: CGEventFlags)
 
@@ -460,9 +1006,9 @@ public extension ActionExecutor {
             return .keys(chords)
         case let .typeText(text):
             return .text(text)
-        case let .coordinateClick(at, space, button, modifiers):
+        case let .coordinateClick(at, space, button, modifiers, clickCount):
             let point = try globalPoint(at, space: space, target: target, environment: environment)
-            return .click(point: point, button: button, flags: modifiers)
+            return .click(point: point, button: button, flags: modifiers, clickCount: clickCount)
         case let .drag(from, to, space, button, modifiers):
             let fromGlobal = try globalPoint(from, space: space, target: target, environment: environment)
             let toGlobal = try globalPoint(to, space: space, target: target, environment: environment)
@@ -548,8 +1094,16 @@ public extension ActionExecutor {
             KeyboardActions.press(chords, via: synthesizer, interruption: interruption, onTarget: onTarget)
         case let .text(text):
             KeyboardActions.type(text, via: synthesizer, interruption: interruption, onTarget: onTarget)
-        case let .click(point, button, flags):
-            PointerActions.click(atGlobal: point, button: button, flags: flags, via: synthesizer, interruption: interruption, onTarget: onTarget)
+        case let .click(point, button, flags, clickCount):
+            PointerActions.click(
+                atGlobal: point,
+                button: button,
+                flags: flags,
+                clickCount: clickCount,
+                via: synthesizer,
+                interruption: interruption,
+                onTarget: onTarget
+            )
         case let .drag(from, to, button, flags):
             PointerActions.drag(fromGlobal: from, toGlobal: to, button: button, flags: flags, via: synthesizer, interruption: interruption, onTarget: onTarget)
         case let .scroll(point, deltaX, deltaY, flags):
@@ -563,12 +1117,14 @@ public extension ActionExecutor {
         interrupted: Bool,
         focusLost: Bool,
         degraded: Bool,
-        elementFocused: Bool? = nil
+        elementFocused: Bool? = nil,
+        targetedDelivery: Bool = false,
+        deliveryConfirmed: Bool = false
     ) -> ActionResult {
         let status: ActionStatus
         if interrupted || focusLost {
-            // Either a genuine physical event (monitor) or the target losing the foreground
-            // mid-delivery cut the input short; the remainder was not delivered.
+            // Either a genuine physical event (monitor) or the target becoming unsafe
+            // mid-delivery (foreground loss / PID exit) cut the input short.
             status = .interrupted
         } else if focus.delivered {
             status = .completed
@@ -583,12 +1139,34 @@ public extension ActionExecutor {
             notes.append("The target could not be brought to the foreground; no input was delivered.")
         }
         if focusLost {
-            notes.append("The target lost the foreground during delivery; the remaining input was not delivered.")
+            if targetedDelivery {
+                notes.append("The target process exited or changed identity during delivery; the remaining input was not delivered.")
+            } else {
+                notes.append("The target lost the foreground during delivery; the remaining input was not delivered.")
+            }
+        }
+        if targetedDelivery, focus.delivered, !interrupted, !focusLost, !deliveryConfirmed {
+            // postToPid has no acknowledgement. Report unconfirmed delivery honestly unless an
+            // existing element-focused/value postcondition already confirmed it.
+            notes.append("Process-targeted delivery was attempted without an observable acknowledgement; delivery is unconfirmed.")
         }
         if degraded {
             notes.append("User-interruption monitoring is unavailable; physical input may not cancel this action.")
         }
         let warning = notes.isEmpty ? nil : notes.joined(separator: " ")
+
+        let targetVerified: Bool
+        if targetedDelivery {
+            // Never claim the target was frontmost or that focus changed for the targeted lane.
+            // Only report verified when an existing postcondition confirms delivery.
+            targetVerified = deliveryConfirmed && !focusLost && !interrupted
+        } else {
+            // For a POINTER action, reaching delivery already proved the point sat over the
+            // target window (globalPoint's bounds/staleness gate); for KEYBOARD, the guard
+            // confirms the target held the foreground throughout. A mid-delivery focus loss
+            // forces this false regardless of the pre-delivery activation result.
+            targetVerified = focus.targetBecameFrontmost && !focusLost
+        }
 
         return ActionResult(
             status: status,
@@ -598,11 +1176,7 @@ public extension ActionExecutor {
             warning: warning,
             focusChanged: focus.focusChanged,
             focusRestored: focus.focusRestored,
-            // For a POINTER action, reaching delivery already proved the point sat over the
-            // target window (globalPoint's bounds/staleness gate); for KEYBOARD, the guard
-            // confirms the target held the foreground throughout. A mid-delivery focus loss
-            // forces this false regardless of the pre-delivery activation result.
-            targetVerified: focus.targetBecameFrontmost && !focusLost,
+            targetVerified: targetVerified,
             // §18.6: whether the resolved element (or a descendant) was confirmed to hold
             // keyboard focus before synthesis. Omitted (nil) unless an element was targeted.
             elementFocused: elementFocused

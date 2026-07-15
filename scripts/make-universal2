@@ -1,0 +1,90 @@
+#!/bin/sh
+# Merge two single-architecture Mach-O binaries into a universal2 binary.
+# Refuses mismatched slice counts, missing arches, or identical input paths.
+#
+# usage: scripts/make-universal2 /path/arm64-bin /path/x86_64-bin /path/out-universal2
+set -eu
+
+if [ "$#" -ne 3 ]; then
+  printf '%s\n' "usage: $0 /path/arm64-bin /path/x86_64-bin /path/out-universal2" >&2
+  exit 2
+fi
+
+arm64_bin=$1
+x86_64_bin=$2
+output=$3
+
+die() {
+  printf '%s\n' "make-universal2: $*" >&2
+  exit 1
+}
+
+require_single_arch() {
+  path=$1
+  expected=$2
+  label=$3
+
+  if [ ! -f "$path" ]; then
+    die "$label not found: $path"
+  fi
+  if [ ! -r "$path" ]; then
+    die "$label is not readable: $path"
+  fi
+
+  file_info=$(/usr/bin/file -b "$path" 2>/dev/null || true)
+  case $file_info in
+    *Mach-O*) ;;
+    *)
+      die "$label is not a Mach-O executable: $path ($file_info)"
+      ;;
+  esac
+
+  archs=$(/usr/bin/lipo -archs "$path" 2>/dev/null || true)
+  if [ "$archs" != "$expected" ]; then
+    die "$label must be exactly $expected, got: $archs ($path)"
+  fi
+}
+
+require_single_arch "$arm64_bin" "arm64" "arm64 input"
+require_single_arch "$x86_64_bin" "x86_64" "x86_64 input"
+
+arm64_abs=$(CDPATH= cd -- "$(dirname -- "$arm64_bin")" && pwd)/$(basename -- "$arm64_bin")
+x86_abs=$(CDPATH= cd -- "$(dirname -- "$x86_64_bin")" && pwd)/$(basename -- "$x86_64_bin")
+if [ "$arm64_abs" = "$x86_abs" ]; then
+  die "arm64 and x86_64 inputs must be distinct files"
+fi
+
+out_dir=$(dirname -- "$output")
+if [ ! -d "$out_dir" ]; then
+  /bin/mkdir -p "$out_dir"
+fi
+
+if [ -e "$output" ]; then
+  /bin/rm -f "$output"
+fi
+
+/usr/bin/lipo -create -output "$output" "$arm64_bin" "$x86_64_bin"
+/bin/chmod 0755 "$output"
+
+archs=$(/usr/bin/lipo -archs "$output" 2>/dev/null || true)
+normalized=$(printf '%s' "$archs" | /usr/bin/tr -s '[:space:]' ' ' | /usr/bin/sed 's/^ //;s/ $//')
+has_arm64=0
+has_x86_64=0
+for arch in $normalized; do
+  case $arch in
+    arm64) has_arm64=1 ;;
+    x86_64) has_x86_64=1 ;;
+    *)
+      die "output has unexpected architecture slice: $arch ($output; archs=$normalized)"
+      ;;
+  esac
+done
+if [ "$has_arm64" -ne 1 ] || [ "$has_x86_64" -ne 1 ]; then
+  die "output is not universal2: $normalized ($output)"
+fi
+slice_count=$(printf '%s\n' $normalized | /usr/bin/wc -w | /usr/bin/tr -d ' ')
+if [ "$slice_count" -ne 2 ]; then
+  die "output must contain exactly two architecture slices, got: $normalized ($output)"
+fi
+
+printf '%s\n' "make-universal2: wrote $output ($normalized)"

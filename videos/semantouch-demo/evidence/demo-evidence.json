@@ -1,0 +1,365 @@
+{
+  "schemaVersion": 1,
+  "runId": "demo-evidence-v1",
+  "packageVersion": "0.2.1",
+  "contractVersion": "semantouch/1",
+  "mcpProtocol": "2025-06-18",
+  "platform": "macOS",
+  "mode": "contract-fixture",
+  "sample": false,
+  "signedRelease": null,
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "source": {
+    "mode": "contract-fixture",
+    "description": "Deterministic evidence compiled from protocol contract goldens, ToolCatalog order, and the computer-use-fixture event format. No live screenshot bytes are fabricated.",
+    "sources": [
+      "Sources/MCPServer/ToolCatalog.swift",
+      "Sources/MCPServer/MCPServer.swift",
+      "Sources/ComputerUseCore/DTOs.swift",
+      "Tests/ComputerUseCoreTests/ActionResultEncodingTests.swift",
+      "Tests/AccessibilityEngineTests/AXTreeDiffTests.swift",
+      "Tests/ProtocolContractTests/ProtocolContractTests.swift",
+      "docs/FIXTURE.md"
+    ]
+  },
+  "tools": {
+    "count": 16,
+    "names": [
+      "doctor",
+      "list_apps",
+      "launch_app",
+      "get_app_state",
+      "read_text",
+      "screenshot",
+      "end_app_session",
+      "click",
+      "perform_action",
+      "set_value",
+      "select_text",
+      "scroll",
+      "press_key",
+      "type_text",
+      "drag",
+      "wait_for"
+    ]
+  },
+  "fixture": {
+    "id": "computer-use-fixture@docs/FIXTURE.md",
+    "app": "computer-use-fixture",
+    "title": "CU Fixture",
+    "events": [
+      {
+        "seq": 1,
+        "event": "ready",
+        "control": "fixture.app",
+        "value": "CU Fixture"
+      },
+      {
+        "seq": 2,
+        "event": "press",
+        "control": "fixture.button.press",
+        "value": 1
+      }
+    ]
+  },
+  "sequence": [
+    {
+      "id": "01-hook",
+      "frame": 1,
+      "title": "Computer use, with receipts",
+      "caption": "Native macOS computer use. Every state transition leaves evidence.",
+      "claims": [
+        {
+          "key": "packageVersion",
+          "value": "0.2.1",
+          "source": "package.json + Sources/MCPServer/MCPServer.swift serverVersion"
+        },
+        {
+          "key": "contractVersion",
+          "value": "semantouch/1",
+          "source": "Sources/MCPServer/MCPServer.swift contractVersion"
+        },
+        {
+          "key": "toolCount",
+          "value": 16,
+          "source": "Sources/MCPServer/ToolCatalog.swift enabledNames"
+        },
+        {
+          "key": "fixtureId",
+          "value": "computer-use-fixture@docs/FIXTURE.md",
+          "source": "docs/FIXTURE.md"
+        },
+        {
+          "key": "verified",
+          "value": true,
+          "source": "offline contract-fixture mode (schema-complete, non-sample)"
+        }
+      ]
+    },
+    {
+      "id": "02-observe",
+      "frame": 2,
+      "title": "Launch, then see through the cover",
+      "caption": "Launch is explicit. ScreenCaptureKit still captures an occluded window.",
+      "claims": [
+        {
+          "key": "launch_app",
+          "value": {
+            "app": {
+              "id": "pid:fixture",
+              "displayName": "computer-use-fixture",
+              "isRunning": true,
+              "windows": 1
+            },
+            "launched": true,
+            "recovered": false,
+            "source": "Sources/ComputerUseCore/DTOs.swift LaunchAppResult + docs/FIXTURE.md"
+          },
+          "source": "Sources/ComputerUseCore/DTOs.swift LaunchAppResult + docs/FIXTURE.md"
+        },
+        {
+          "key": "screenshot",
+          "value": {
+            "mimeType": "image/jpeg",
+            "width": 960,
+            "height": 720,
+            "coveredWindowCapture": "ScreenCaptureKit per-window capture includes occluded windows when Screen Recording is granted (docs/PLAN.md Stage D / PROTOCOL capture model).",
+            "imageBytesIncluded": false
+          },
+          "source": "Sources/ComputerUseCore/DTOs.swift ScreenshotMeta (mimeType always image/jpeg on MCP path)"
+        }
+      ]
+    },
+    {
+      "id": "03-act",
+      "frame": 3,
+      "title": "Meaning before coordinates",
+      "caption": "Stable ID. Matching revision. Native AXPress.",
+      "claims": [
+        {
+          "key": "target",
+          "value": {
+            "app": "computer-use-fixture",
+            "sessionId": "s1",
+            "revision": 1,
+            "elementId": "e2",
+            "axIdentifier": "fixture.button.press"
+          },
+          "source": "docs/FIXTURE.md fixture.button.press + ElementTarget quadruple"
+        },
+        {
+          "key": "click",
+          "value": {
+            "status": "completed",
+            "method": "accessibility",
+            "stateChanged": true,
+            "refreshRecommended": true
+          },
+          "source": "Tests/ComputerUseCoreTests/ActionResultEncodingTests.swift#testSemanticResultOmitsAllV15Fields"
+        },
+        {
+          "key": "fixtureEvent",
+          "value": {
+            "seq": 2,
+            "event": "press",
+            "control": "fixture.button.press",
+            "value": 1
+          },
+          "source": "docs/FIXTURE.md event log format"
+        },
+        {
+          "key": "coordinateFallback",
+          "value": "not-used",
+          "source": "method=accessibility (AXPress path)"
+        }
+      ]
+    },
+    {
+      "id": "04-prove",
+      "frame": 4,
+      "title": "Diff, then reject the stale past",
+      "caption": "The action advances the revision. The old target cannot be replayed.",
+      "claims": [
+        {
+          "key": "diff",
+          "value": {
+            "baseRevision": 1,
+            "revision": 2,
+            "full": false,
+            "tree": {
+              "format": "semantouch-ax-tree-v1",
+              "text": "UI revision 2, based on 1\n~ [e2] AXButton \"Run\" enabled=false → enabled=true\n~ [e3] AXStaticText value=\"Idle\" → value=\"Building\"\n+ [e4] AXStaticText value=\"Done\" frame=10,80,200,20 @e1:2",
+              "nodeCount": 4,
+              "truncated": false,
+              "source": "Tests/AccessibilityEngineTests/AXTreeDiffTests.swift#testGoldenChangedAddedGrammar"
+            },
+            "equality": "apply(diff, revision N) reconstructs revision N+1 (AXTreeDiffTests assertRoundtrip)"
+          },
+          "source": "Tests/AccessibilityEngineTests/AXTreeDiffTests.swift#testGoldenChangedAddedGrammar"
+        },
+        {
+          "key": "stale_revision",
+          "value": {
+            "code": "stale_revision",
+            "message": "The provided revision is stale; refresh with get_app_state.",
+            "data": {
+              "sessionId": "s1",
+              "provided": 1,
+              "current": 2
+            },
+            "source": "Tests/ProtocolContractTests/ProtocolContractTests.swift (stale_revision matrix)"
+          },
+          "source": "Tests/ProtocolContractTests/ProtocolContractTests.swift (stale_revision matrix)"
+        }
+      ]
+    },
+    {
+      "id": "05-wait",
+      "frame": 5,
+      "title": "Wait for state, not sleep",
+      "caption": "Bounded polling. Typed outcome. No blind sleep.",
+      "claims": [
+        {
+          "key": "wait_for",
+          "value": {
+            "request": {
+              "app": "computer-use-fixture",
+              "sessionId": "s1",
+              "mode": "all",
+              "timeoutMs": 5000,
+              "conditions": [
+                {
+                  "kind": "title_contains",
+                  "value": "Fixture"
+                }
+              ]
+            },
+            "result": {
+              "satisfied": true,
+              "elapsedMs": 640,
+              "conditions": [
+                {
+                  "kind": "title_contains",
+                  "satisfied": true
+                }
+              ],
+              "observed": {
+                "windowTitle": "CU Fixture"
+              },
+              "refreshRecommended": true,
+              "source": "Tests/ComputerUseCoreTests/ActionResultEncodingTests.swift#testWaitForResultByteShapeAndRoundTrip"
+            }
+          },
+          "source": "Tests/ComputerUseCoreTests/ActionResultEncodingTests.swift#testWaitForResultByteShapeAndRoundTrip"
+        },
+        {
+          "key": "timeoutBranch",
+          "value": "unselected",
+          "source": "satisfied:true path; expired deadline would be satisfied:false, not a timeout error"
+        }
+      ]
+    },
+    {
+      "id": "06-yield",
+      "frame": 6,
+      "title": "Human input wins immediately",
+      "caption": "Targeted when safe. Cancelled when the user intervenes.",
+      "claims": [
+        {
+          "key": "interference",
+          "value": {
+            "policy": "background-only",
+            "result": {
+              "status": "interrupted",
+              "method": "pointer",
+              "stateChanged": false,
+              "refreshRecommended": true,
+              "focusChanged": false,
+              "focusRestored": false,
+              "targetVerified": false,
+              "note": "Physical user input cancels pending fallback delivery; fixture must show no duplicate mutation.",
+              "source": "Sources/ComputerUseCore/DTOs.swift ActionStatus.interrupted + PROTOCOL interference model"
+            },
+            "fixtureProof": "no duplicate mutation"
+          },
+          "source": "Sources/ComputerUseCore/DTOs.swift ActionStatus.interrupted + PROTOCOL interference model"
+        }
+      ]
+    },
+    {
+      "id": "07-close",
+      "frame": 7,
+      "title": "One app. One contract. Sixteen tools.",
+      "caption": "Signed whole-app updates preserve identity. Choose OMP, npm, or Homebrew.",
+      "claims": [
+        {
+          "key": "appIdentity",
+          "value": {
+            "bundleId": "tech.watzon.semantouch",
+            "teamId": "MB5789APU7",
+            "version": "0.2.1",
+            "architecture": "universal2 (arm64 + x86_64)",
+            "minMacOS": "14.0",
+            "notarization": "Developer ID + notarization required for published releases"
+          },
+          "source": "Sources/SemantouchCLIKit/Packaging.swift + .github/workflows/release.yml"
+        },
+        {
+          "key": "toolCatalog",
+          "value": [
+            "doctor",
+            "list_apps",
+            "launch_app",
+            "get_app_state",
+            "read_text",
+            "screenshot",
+            "end_app_session",
+            "click",
+            "perform_action",
+            "set_value",
+            "select_text",
+            "scroll",
+            "press_key",
+            "type_text",
+            "drag",
+            "wait_for"
+          ],
+          "source": "Sources/MCPServer/ToolCatalog.swift"
+        },
+        {
+          "key": "installRoutes",
+          "value": [
+            {
+              "id": "omp",
+              "label": "OMP plugin",
+              "command": "omp plugin install github:watzon/semantouch#v0.2.1"
+            },
+            {
+              "id": "npm",
+              "label": "npm",
+              "command": "npm i -g @watzon/semantouch",
+              "note": "Requires a release that publishes the universal2 app ZIP + release-digest pin."
+            },
+            {
+              "id": "homebrew",
+              "label": "Homebrew",
+              "command": "brew install --cask watzon/tap/semantouch",
+              "note": "Requires the public homebrew-tap cask for the universal2 ZIP."
+            }
+          ],
+          "source": "README.md / docs/INSTALL.md install surfaces (availability may lag the in-tree packaging)"
+        },
+        {
+          "key": "reproduce",
+          "value": "node scripts/record-demo-evidence.mjs && (cd videos/semantouch-demo && npm run check)",
+          "source": "this script"
+        }
+      ]
+    }
+  ],
+  "integrity": {
+    "algorithm": "sha256",
+    "digest": "df6e1294229490ed2ae234e87ff1d3d3898cefbe24292db1d95cf73b7e8b49c6",
+    "of": "evidence-without-integrity"
+  }
+}

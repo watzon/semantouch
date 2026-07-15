@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>06-yield</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #173d2a;
+          font-family: sans-serif;
+          background-color: #f2efe5;
+          background-image:
+            linear-gradient(rgba(77, 245, 69, 0.1) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(77, 245, 69, 0.1) 1px, transparent 1px);
+          background-size: 38.4px 38.4px;
+        }
+        .hairline {
+          position: absolute;
+          left: 76.8px;
+          right: 76.8px;
+          border-top: 2.3px solid #173d2a;
+        }
+        .hairline.top {
+          top: 57.6px;
+        }
+        .hairline.bottom {
+          bottom: 57.6px;
+        }
+        .kicker {
+          position: absolute;
+          top: 90px;
+          left: 96px;
+          font-weight: 600;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          font-size: 13px;
+        }
+        .title {
+          position: absolute;
+          top: 130px;
+          left: 96px;
+          font-family: serif;
+          font-size: 48px;
+          line-height: 1.05;
+          max-width: 1100px;
+        }
+        .cols {
+          position: absolute;
+          top: 280px;
+          left: 96px;
+          right: 96px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 48px;
+        }
+        .panel {
+          border: 2px solid #173d2a;
+          min-height: 280px;
+          padding: 24px;
+        }
+        .panel h3 {
+          margin: 0 0 18px;
+          font-family: monospace;
+          font-size: 13px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+        }
+        .pid {
+          font-family: serif;
+          font-size: 42px;
+          margin-bottom: 12px;
+        }
+        .mono {
+          font-family: monospace;
+          font-size: 15px;
+          line-height: 1.7;
+        }
+        .lane {
+          position: absolute;
+          left: 96px;
+          right: 96px;
+          top: 640px;
+          height: 48px;
+          border: 2px solid #173d2a;
+          overflow: hidden;
+        }
+        .lane-fill {
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          width: 100%;
+          background: rgba(77, 245, 69, 0.25);
+        }
+        .slice {
+          position: absolute;
+          left: -10%;
+          top: 0;
+          bottom: 0;
+          width: 18%;
+          background: #173d2a;
+          opacity: 0;
+        }
+        .stamp-row {
+          position: absolute;
+          left: 96px;
+          right: 96px;
+          bottom: 120px;
+          display: flex;
+          gap: 28px;
+          align-items: center;
+          font-family: monospace;
+          font-size: 16px;
+        }
+        .stamp {
+          border: 2px solid #4df545;
+          color: #1f6b1c;
+          padding: 10px 16px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+        }
+        .cursor {
+          position: absolute;
+          width: 28px;
+          height: 28px;
+          right: 180px;
+          bottom: 200px;
+          opacity: 1;
+        }
+      </style>
+
+      <div id="root" data-composition-id="06-yield" data-width="1920" data-height="1080" data-duration="6">
+        <div class="hairline top"></div>
+        <div class="hairline bottom"></div>
+        <div class="kicker">06 · YIELD</div>
+        <div class="title">Targeted when safe.<br />Cancelled when the user intervenes.</div>
+        <div class="cols">
+          <div class="panel" id="y6-fg">
+            <h3>foreground</h3>
+            <div class="pid">UserApp</div>
+            <div class="mono">pid unchanged<br />focus preserved</div>
+          </div>
+          <div class="panel" id="y6-tg">
+            <h3>target fixture</h3>
+            <div class="pid">CU Fixture</div>
+            <div class="mono">background-only delivery<br />policy: <span id="y6-pol">—</span></div>
+          </div>
+        </div>
+        <div class="lane" id="y6-lane">
+          <div class="lane-fill" id="y6-fill"></div>
+          <div class="slice" id="y6-slice"></div>
+        </div>
+        <div class="stamp-row" id="y6-stamps">
+          <div class="stamp" id="y6-status">—</div>
+          <div id="y6-proof">—</div>
+        </div>
+        <div class="cursor" id="y6-cursor">
+          <svg viewBox="0 0 28 28" width="28" height="28">
+            <path d="M4 3 L4 22 L9.5 16.5 L13 24 L16 22.5 L12.5 15 L20 15 Z" fill="#4DF545" stroke="#173D2A" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
+        </div>
+      </div>
+
+      <script>
+        (function () {
+          const E = window.__SemantouchDemo;
+          const step = E.frameById("06-yield");
+          const inter = E.claim(step, "interference");
+          E.text(document.getElementById("y6-pol"), inter.policy);
+          E.text(document.getElementById("y6-status"), inter.result.status);
+          E.text(document.getElementById("y6-proof"), "fixture · " + inter.fixtureProof);
+
+          window.__timelines = window.__timelines || {};
+          const tl = gsap.timeline({ paused: true });
+          tl.fromTo("#y6-fg", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.45 }, 0.15);
+          tl.fromTo("#y6-tg", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.45 }, 0.3);
+          tl.fromTo("#y6-fill", { scaleX: 0, transformOrigin: "left center" }, { scaleX: 0.7, duration: 1.4, ease: "power1.out" }, 0.6);
+          tl.fromTo("#y6-slice", { opacity: 0, x: -200 }, { opacity: 1, x: 820, duration: 0.35, ease: "power2.in" }, 2.15);
+          tl.to("#y6-fill", { scaleX: 0.48, duration: 0.01 }, 2.4);
+          tl.to("#y6-cursor", { opacity: 0.25, duration: 0.4 }, 4.3);
+          tl.fromTo("#y6-stamps", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.45 }, 4.35);
+          window.__timelines["06-yield"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>

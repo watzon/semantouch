@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>03-act</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #173d2a;
+          font-family: sans-serif;
+          background-color: #f2efe5;
+          background-image:
+            linear-gradient(rgba(77, 245, 69, 0.1) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(77, 245, 69, 0.1) 1px, transparent 1px);
+          background-size: 38.4px 38.4px;
+        }
+        .hairline {
+          position: absolute;
+          left: 76.8px;
+          right: 76.8px;
+          border-top: 2.3px solid #173d2a;
+        }
+        .hairline.top {
+          top: 57.6px;
+        }
+        .hairline.bottom {
+          bottom: 57.6px;
+        }
+        .kicker {
+          position: absolute;
+          top: 90px;
+          left: 96px;
+          font-weight: 600;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          font-size: 13px;
+        }
+        .title {
+          position: absolute;
+          top: 130px;
+          left: 96px;
+          font-family: serif;
+          font-size: 48px;
+          line-height: 1.05;
+        }
+        .edge {
+          position: absolute;
+          top: 90px;
+          right: 96px;
+          text-align: right;
+          font-family: monospace;
+          font-size: 13px;
+          letter-spacing: 0.06em;
+          line-height: 1.8;
+        }
+        .tree {
+          position: absolute;
+          top: 240px;
+          left: 96px;
+          width: 980px;
+          font-family: monospace;
+          font-size: 16px;
+          line-height: 1.75;
+        }
+        .node {
+          opacity: 0;
+          transform: translateX(-12px);
+        }
+        .node.selected {
+          color: #1f6b1c;
+          font-weight: 400;
+        }
+        .result {
+          position: absolute;
+          top: 280px;
+          right: 96px;
+          width: 620px;
+          border: 2px solid #173d2a;
+          padding: 28px;
+        }
+        .result h3 {
+          font-family: serif;
+          font-size: 28px;
+          font-weight: 400;
+          margin: 0 0 18px;
+        }
+        .kv {
+          display: grid;
+          grid-template-columns: 180px 1fr;
+          gap: 10px 16px;
+          font-family: monospace;
+          font-size: 15px;
+          margin-bottom: 8px;
+        }
+        .kv .lab {
+          opacity: 0.55;
+        }
+        .ok {
+          color: #1f6b1c;
+        }
+        .cross {
+          text-decoration: line-through;
+          opacity: 0.4;
+        }
+        .cursor {
+          position: absolute;
+          width: 28px;
+          height: 28px;
+          left: 420px;
+          top: 420px;
+          opacity: 0;
+          z-index: 5;
+        }
+        .pulse {
+          position: absolute;
+          width: 36px;
+          height: 36px;
+          border: 2px solid #4df545;
+          border-radius: 0;
+          left: 416px;
+          top: 416px;
+          opacity: 0;
+        }
+      </style>
+
+      <div id="root" data-composition-id="03-act" data-width="1920" data-height="1080" data-duration="6">
+        <div class="hairline top"></div>
+        <div class="hairline bottom"></div>
+        <div class="kicker">03 · ACT</div>
+        <div class="title">Stable ID. Matching revision.<br />Native AXPress.</div>
+        <div class="edge">
+          session <span id="a3-session">—</span><br />
+          revision <span id="a3-rev">—</span>
+        </div>
+        <div class="tree" id="a3-tree">
+          <div class="node" id="a3-n0">[e1] AXWindow "CU Fixture"</div>
+          <div class="node" id="a3-n1">&nbsp;&nbsp;[e2] AXButton "Press Me" actions=[Press]</div>
+          <div class="node selected" id="a3-n2">&nbsp;&nbsp;&nbsp;&nbsp;↳ fixture.button.press</div>
+          <div class="node" id="a3-n3">&nbsp;&nbsp;[e3] AXStaticText "Presses: 0"</div>
+          <div class="node" id="a3-n4">&nbsp;&nbsp;[e4] AXTextField</div>
+        </div>
+        <div class="result" id="a3-result">
+          <h3>click result</h3>
+          <div class="kv"><span class="lab">status</span><span class="ok" id="a3-status">—</span></div>
+          <div class="kv"><span class="lab">method</span><span id="a3-method">—</span></div>
+          <div class="kv"><span class="lab">stateChanged</span><span id="a3-sc">—</span></div>
+          <div class="kv"><span class="lab">fixture event</span><span id="a3-ev">—</span></div>
+          <div class="kv"><span class="lab">coordinate</span><span class="cross" id="a3-fb">fallback</span></div>
+        </div>
+        <div class="cursor" id="a3-cursor">
+          <svg viewBox="0 0 28 28" width="28" height="28">
+            <path d="M4 3 L4 22 L9.5 16.5 L13 24 L16 22.5 L12.5 15 L20 15 Z" fill="#4DF545" stroke="#173D2A" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
+        </div>
+        <div class="pulse" id="a3-pulse"></div>
+      </div>
+
+      <script>
+        (function () {
+          const E = window.__SemantouchDemo;
+          const step = E.frameById("03-act");
+          const target = E.claim(step, "target");
+          const click = E.claim(step, "click");
+          const ev = E.claim(step, "fixtureEvent");
+          E.text(document.getElementById("a3-session"), target.sessionId);
+          E.text(document.getElementById("a3-rev"), String(target.revision));
+          E.text(document.getElementById("a3-status"), click.status);
+          E.text(document.getElementById("a3-method"), click.method);
+          E.text(document.getElementById("a3-sc"), String(click.stateChanged));
+          E.text(
+            document.getElementById("a3-ev"),
+            ev.event + " / " + ev.control + " → " + ev.value,
+          );
+          E.text(document.getElementById("a3-fb"), "coordinate fallback");
+
+          window.__timelines = window.__timelines || {};
+          const tl = gsap.timeline({ paused: true });
+          tl.fromTo("#a3-tree .node", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.4, stagger: 0.12, ease: "power2.out" }, 0.2);
+          tl.fromTo("#a3-n2", { scale: 1 }, { scale: 1.02, duration: 0.35, yoyo: true, repeat: 1, ease: "power1.inOut" }, 1.6);
+          tl.fromTo("#a3-cursor", { opacity: 0, x: -80, y: 40 }, { opacity: 1, x: 0, y: 0, duration: 1.1, ease: "power2.inOut" }, 1.9);
+          tl.fromTo("#a3-pulse", { opacity: 0.9, scale: 0.5 }, { opacity: 0, scale: 1.8, duration: 0.55, ease: "power2.out" }, 3.2);
+          tl.fromTo("#a3-result", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 4.3);
+          window.__timelines["03-act"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>

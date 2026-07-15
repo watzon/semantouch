@@ -1,0 +1,12 @@
+[package]
+name = "semantouch-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Semantouch wire types, 16-tool catalog, and error codes shared by all platforms"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -6,9 +6,11 @@ an agent per-window screen capture (including covered windows), a compact access
 tree with stable element ids, semantic accessibility actions, incremental tree diffs,
 guarded native input fallback, and a decorative virtual-cursor overlay.
 
-The project [`README.md`](../README.md) covers the product, quick start, and
+The project [`README.md`](../README.md) (canonical English) and
+[`README.zh-CN.md`](../README.zh-CN.md) cover the product, quick start, and
 main workflows. The documents below provide installation, usage, protocol, and
-implementation detail.
+implementation detail. Contribution workflow lives in
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Read in this order
 
@@ -33,6 +35,14 @@ implementation detail.
   and the verification matrix.
 - **[`../packaging/`](../packaging/)** — the generated OMP plugin manifest and example MCP
   config, and how to regenerate them.
+
+## Community
+
+- [`../README.md`](../README.md) / [`../README.zh-CN.md`](../README.zh-CN.md) — bilingual product entry
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — contribution and acceptance expectations
+- [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) — community standards
+- [DeepWiki](https://deepwiki.com/watzon/semantouch) — browsable repository documentation
+- [Star history](https://www.star-history.com/#watzon/semantouch&Date) — repository star history chart
 
 ## Command-line interface
 

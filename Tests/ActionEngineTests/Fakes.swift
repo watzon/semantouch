@@ -132,13 +132,18 @@ func target(app: String = "computer-use-fixture", session: String = "s1", revisi
 
 // MARK: - Phase 4 fallback fakes
 
-/// A recording `InputSynthesizer`: captures every emitted event and never posts a real
-/// CGEvent. `onEmit` lets a test inject an interruption mid-stream.
-final class FakeSynthesizer: InputSynthesizer {
+/// A recording `InputSynthesizer` (+ optional `ProcessTargetedInputSynthesizer`): captures
+/// every emitted event and never posts a real CGEvent. `onEmit` lets a test inject an
+/// interruption mid-stream. Targeted key/text events record the explicit PID so tests can
+/// prove the targeted lane was used without activation.
+final class FakeSynthesizer: InputSynthesizer, ProcessTargetedInputSynthesizer {
     enum Event: Equatable {
         case keyDown(CGKeyCode, CGEventFlags)
         case keyUp(CGKeyCode, CGEventFlags)
         case type(String)
+        case targetedKeyDown(CGKeyCode, CGEventFlags, pid_t)
+        case targetedKeyUp(CGKeyCode, CGEventFlags, pid_t)
+        case targetedType(String, pid_t)
         case mouseDown(CGPoint, PointerButton)
         case mouseUp(CGPoint, PointerButton)
         case mouseDrag(CGPoint, PointerButton)
@@ -153,6 +158,11 @@ final class FakeSynthesizer: InputSynthesizer {
     /// pointer → no restore move) so event-sequence goldens see exactly the delivered
     /// input; restore tests opt in by setting a location.
     var reportedPointerLocation: CGPoint?
+    /// When false, this fake does NOT conform as a usable targeted synthesizer from the
+    /// executor's perspective: tests set this by wrapping a non-targeted stand-in. The
+    /// recording methods below still exist for direct unit use; the executor only casts
+    /// `as? ProcessTargetedInputSynthesizer`, so disable via a separate type when needed.
+    /// Kept for documentation of the dual-lane recording surface.
 
     private func record(_ event: Event) {
         events.append(event)
@@ -162,12 +172,50 @@ final class FakeSynthesizer: InputSynthesizer {
     func keyDown(keyCode: CGKeyCode, flags: CGEventFlags) { record(.keyDown(keyCode, flags)) }
     func keyUp(keyCode: CGKeyCode, flags: CGEventFlags) { record(.keyUp(keyCode, flags)) }
     func typeUnicode(_ string: String) { record(.type(string)) }
+
+    func keyDown(keyCode: CGKeyCode, flags: CGEventFlags, toPid pid: pid_t) {
+        record(.targetedKeyDown(keyCode, flags, pid))
+    }
+    func keyUp(keyCode: CGKeyCode, flags: CGEventFlags, toPid pid: pid_t) {
+        record(.targetedKeyUp(keyCode, flags, pid))
+    }
+    func typeUnicode(_ string: String, toPid pid: pid_t) {
+        record(.targetedType(string, pid))
+    }
+
     func mouseDown(at: CGPoint, button: PointerButton, flags: CGEventFlags) { record(.mouseDown(at, button)) }
     func mouseUp(at: CGPoint, button: PointerButton, flags: CGEventFlags) { record(.mouseUp(at, button)) }
     func mouseDrag(to: CGPoint, button: PointerButton, flags: CGEventFlags) { record(.mouseDrag(to, button)) }
     func scroll(at: CGPoint, deltaX: Int32, deltaY: Int32, flags: CGEventFlags) { record(.scroll(at, deltaX, deltaY)) }
     func pointerLocation() -> CGPoint? { reportedPointerLocation }
     func movePointer(to point: CGPoint) { record(.movePointer(point)) }
+}
+
+/// Global-only synthesizer: does NOT conform to `ProcessTargetedInputSynthesizer`, so the
+/// executor cannot take the targeted lane and must return `focus_required` for
+/// background-only non-frontmost keyboard when only this synthesizer is available.
+final class GlobalOnlyFakeSynthesizer: InputSynthesizer {
+    let inner = FakeSynthesizer()
+
+    var events: [FakeSynthesizer.Event] { inner.events }
+    var onEmit: (() -> Void)? {
+        get { inner.onEmit }
+        set { inner.onEmit = newValue }
+    }
+    var reportedPointerLocation: CGPoint? {
+        get { inner.reportedPointerLocation }
+        set { inner.reportedPointerLocation = newValue }
+    }
+
+    func keyDown(keyCode: CGKeyCode, flags: CGEventFlags) { inner.keyDown(keyCode: keyCode, flags: flags) }
+    func keyUp(keyCode: CGKeyCode, flags: CGEventFlags) { inner.keyUp(keyCode: keyCode, flags: flags) }
+    func typeUnicode(_ string: String) { inner.typeUnicode(string) }
+    func mouseDown(at: CGPoint, button: PointerButton, flags: CGEventFlags) { inner.mouseDown(at: at, button: button, flags: flags) }
+    func mouseUp(at: CGPoint, button: PointerButton, flags: CGEventFlags) { inner.mouseUp(at: at, button: button, flags: flags) }
+    func mouseDrag(to: CGPoint, button: PointerButton, flags: CGEventFlags) { inner.mouseDrag(to: to, button: button, flags: flags) }
+    func scroll(at: CGPoint, deltaX: Int32, deltaY: Int32, flags: CGEventFlags) { inner.scroll(at: at, deltaX: deltaX, deltaY: deltaY, flags: flags) }
+    func pointerLocation() -> CGPoint? { inner.pointerLocation() }
+    func movePointer(to point: CGPoint) { inner.movePointer(to: point) }
 }
 
 /// A fake `WorkspaceControlling` that models frontmost/activate/record/restore with
@@ -242,6 +290,9 @@ final class FakeFallbackEnvironment: FallbackEnvironment {
 
     let fakeWorkspace: FakeWorkspace
     let fakeSynthesizer: FakeSynthesizer
+    /// Optional global-only synthesizer stand-in. When set, `synthesizer` returns this instead
+    /// of `fakeSynthesizer` so the executor cannot cast to `ProcessTargetedInputSynthesizer`.
+    let globalOnlySynthesizer: GlobalOnlyFakeSynthesizer?
     let monitor: InterruptionState
 
     private(set) var policyChecks: [String] = []
@@ -249,10 +300,12 @@ final class FakeFallbackEnvironment: FallbackEnvironment {
     init(
         workspace: FakeWorkspace = FakeWorkspace(),
         synthesizer: FakeSynthesizer = FakeSynthesizer(),
+        globalOnlySynthesizer: GlobalOnlyFakeSynthesizer? = nil,
         interruption: InterruptionState = InterruptionState()
     ) {
         self.fakeWorkspace = workspace
         self.fakeSynthesizer = synthesizer
+        self.globalOnlySynthesizer = globalOnlySynthesizer
         self.monitor = interruption
     }
 
@@ -281,7 +334,7 @@ final class FakeFallbackEnvironment: FallbackEnvironment {
         return currentFrames[sessionId] ?? geometries[sessionId]?.framePoints
     }
     var workspace: WorkspaceControlling { fakeWorkspace }
-    var synthesizer: InputSynthesizer { fakeSynthesizer }
+    var synthesizer: InputSynthesizer { globalOnlySynthesizer ?? fakeSynthesizer }
     var interruption: InterruptionMonitoring { monitor }
 }
 

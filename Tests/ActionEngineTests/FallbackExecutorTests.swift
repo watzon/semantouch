@@ -75,14 +75,199 @@ final class FallbackExecutorTests: XCTestCase {
 
     // MARK: - Interference modes
 
-    func testBackgroundOnlyNotFrontmostReturnsFocusRequired() {
+    func testBackgroundOnlyPointerNotFrontmostReturnsFocusRequired() {
+        // Pointer actions remain ineligible for the targeted lane: background-only +
+        // non-frontmost still returns focus_required and posts nothing.
         let env = readyEnvironment(frontmostPID: 99) // user app frontmost, not the target
-        XCTAssertThrowsError(try executor().executeFallback(pressA(), target: fallbackTarget(interference: .backgroundOnly), environment: env)) { error in
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
+        XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(interference: .backgroundOnly), environment: env)) { error in
             guard case let CUError.focusRequired(app, frontmostApp) = error else { return XCTFail("expected focusRequired") }
             XCTAssertEqual(app, "computer-use-fixture")
             XCTAssertEqual(frontmostApp, "UserApp")
         }
-        XCTAssertTrue(env.fakeSynthesizer.events.isEmpty, "background-only must not deliver to a non-frontmost target")
+        XCTAssertTrue(env.fakeSynthesizer.events.isEmpty, "pointer must not silently fall back to global delivery")
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty, "never auto-escalates to focus")
+    }
+
+    // MARK: - Process-targeted keyboard delivery
+
+    func testBackgroundOnlyKeyboardNotFrontmostUsesTargetedLane() throws {
+        // Eligible background keys take the targeted lane without activation.
+        let env = readyEnvironment(frontmostPID: 99) // user app frontmost, not the target
+        let result = try executor().executeFallback(pressA(), target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertEqual(result.method, .keyboard)
+        XCTAssertEqual(result.focusChanged, false, "targeted delivery never claims focus changed")
+        XCTAssertEqual(result.focusRestored, false)
+        XCTAssertEqual(result.targetVerified, false, "postToPid has no acknowledgement")
+        XCTAssertTrue(result.warning?.contains("unconfirmed") ?? false)
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .targetedKeyDown(0x00, [], 42),
+            .targetedKeyUp(0x00, [], 42),
+        ])
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty, "no activation on the targeted lane")
+        XCTAssertEqual(env.fakeWorkspace.frontmostPID, 99, "user foreground undisturbed")
+    }
+
+    func testBackgroundOnlyTypeTextNotFrontmostUsesTargetedLane() throws {
+        let env = readyEnvironment(frontmostPID: 99)
+        let result = try executor().executeFallback(.typeText("hi"), target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertEqual(result.focusChanged, false)
+        XCTAssertEqual(result.targetVerified, false)
+        XCTAssertTrue(result.warning?.contains("unconfirmed") ?? false)
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .targetedType("h", 42),
+            .targetedType("i", 42),
+        ])
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty)
+    }
+
+    func testTargetedDeliveryConfirmedWhenElementFocused() throws {
+        // Existing element-focused postcondition can confirm delivery for the targeted lane.
+        let env = readyEnvironment(frontmostPID: 99)
+        let element = FakeActionElement(settable: [AXActionName.focused])
+        element.focusConfirmed = true
+        env.elements["s1/e5"] = element
+        let target = FallbackTarget(
+            app: "computer-use-fixture",
+            sessionId: "s1",
+            interference: .backgroundOnly,
+            revision: 1,
+            elementId: "e5"
+        )
+        let result = try executor().executeFallback(pressA(), target: target, environment: env)
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertEqual(result.elementFocused, true)
+        XCTAssertEqual(result.targetVerified, true, "element-focused postcondition confirms delivery")
+        XCTAssertEqual(result.focusChanged, false)
+        XCTAssertNil(result.warning, "confirmed targeted delivery needs no unconfirmed warning")
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .targetedKeyDown(0x00, [], 42),
+            .targetedKeyUp(0x00, [], 42),
+        ])
+    }
+
+    func testIneligibleSynthesizerDoesNotSilentlyFallBackGlobally() {
+        // Without ProcessTargetedInputSynthesizer capability, keyboard stays focus_required —
+        // never silently posts to the session tap into the frontmost (wrong) app.
+        let workspace = FakeWorkspace(frontmostPID: 99, frontmostAppName: "UserApp")
+        let env = FakeFallbackEnvironment(workspace: workspace, globalOnlySynthesizer: GlobalOnlyFakeSynthesizer())
+        env.revisions["s1"] = 1
+        env.pids["s1"] = 42
+        env.geometries["s1"] = fixtureGeometry()
+        XCTAssertThrowsError(try executor().executeFallback(pressA(), target: fallbackTarget(interference: .backgroundOnly), environment: env)) { error in
+            guard case CUError.focusRequired = error else { return XCTFail("expected focusRequired") }
+        }
+        XCTAssertTrue(env.globalOnlySynthesizer?.events.isEmpty ?? false, "no global keyboard events posted")
+        XCTAssertTrue(env.fakeSynthesizer.events.isEmpty)
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty)
+    }
+
+    func testTargetedDeliveryPIDMismatchStopsFurtherPosts() throws {
+        // Mid-delivery PID identity change: remaining chords are cancelled; no activation.
+        let env = readyEnvironment(frontmostPID: 99)
+        var emitted = 0
+        env.fakeSynthesizer.onEmit = {
+            emitted += 1
+            if emitted == 2 {
+                env.pids["s1"] = 999 // PID reuse / identity change
+            }
+        }
+        let action = FallbackAction.pressKey(chords: [
+            KeyChord(flags: [], keyCode: 0x00),
+            KeyChord(flags: [], keyCode: 0x08),
+            KeyChord(flags: [], keyCode: 0x09),
+        ])
+        let result = try executor().executeFallback(action, target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .interrupted)
+        XCTAssertEqual(result.targetVerified, false)
+        XCTAssertEqual(result.focusChanged, false)
+        XCTAssertEqual(env.fakeSynthesizer.events.count, 2, "remaining chords cancelled after PID mismatch")
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty)
+        XCTAssertTrue(
+            (result.warning?.contains("process") ?? false) || (result.warning?.contains("identity") ?? false),
+            "warning should describe process/identity loss"
+        )
+    }
+    func testTargetedDeliveryTargetExitBeforePostPostsNothing() throws {
+        // Target exit between decide and re-bind: second targetPID read is nil → post nothing.
+        final class CountingPIDEnv: FallbackEnvironment {
+            let base: FakeFallbackEnvironment
+            private var pidReads = 0
+            init(base: FakeFallbackEnvironment) { self.base = base }
+            func policyCheck(app: String) throws -> PolicyDenyReason? { try base.policyCheck(app: app) }
+            func currentRevision(sessionId: String) -> Int? { base.currentRevision(sessionId: sessionId) }
+            func sessionOwnedByApp(sessionId: String, app: String) throws -> Bool {
+                try base.sessionOwnedByApp(sessionId: sessionId, app: app)
+            }
+            func resolveElement(sessionId: String, elementId: String, revision: Int) throws -> ActionElement {
+                try base.resolveElement(sessionId: sessionId, elementId: elementId, revision: revision)
+            }
+            func targetPID(sessionId: String) -> pid_t? {
+                pidReads += 1
+                // First read: decide. Second read: targeted re-bind → nil (target exited).
+                if pidReads >= 2 { return nil }
+                return base.targetPID(sessionId: sessionId)
+            }
+            func windowGeometry(sessionId: String) -> WindowGeometry? { base.windowGeometry(sessionId: sessionId) }
+            func currentWindowFrame(sessionId: String) -> Rect? { base.currentWindowFrame(sessionId: sessionId) }
+            var workspace: WorkspaceControlling { base.workspace }
+            var synthesizer: InputSynthesizer { base.synthesizer }
+            var interruption: InterruptionMonitoring { base.interruption }
+        }
+
+        let base = readyEnvironment(frontmostPID: 99)
+        let env = CountingPIDEnv(base: base)
+        let result = try executor().executeFallback(pressA(), target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .interrupted)
+        XCTAssertEqual(result.targetVerified, false)
+        XCTAssertEqual(result.focusChanged, false)
+        XCTAssertTrue(base.fakeSynthesizer.events.isEmpty, "target exit before post delivers nothing")
+        XCTAssertTrue(base.fakeWorkspace.activatedPIDs.isEmpty)
+    }
+
+    func testTargetedInterruptionReleasesHeldModifiers() throws {
+        // Interruption mid-chord sequence still cancels remaining units; the chord already
+        // emitted released its own modifiers (KeyboardActions.emit is atomic per chord).
+        let env = readyEnvironment(frontmostPID: 99)
+        var emitted = 0
+        env.fakeSynthesizer.onEmit = {
+            emitted += 1
+            // After the first full chord (modifier down, key down/up, modifier up = 4 events
+            // for cmd+a), interrupt before the second chord.
+            if emitted == 4 { env.monitor.observe(isOurs: false, at: 1.0) }
+        }
+        let action = FallbackAction.pressKey(chords: [
+            KeyChord(flags: .maskCommand, keyCode: 0x00), // cmd+a
+            KeyChord(flags: .maskCommand, keyCode: 0x08), // cmd+c — must not start
+        ])
+        let result = try executor().executeFallback(action, target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .interrupted)
+        XCTAssertEqual(result.focusChanged, false)
+        XCTAssertEqual(result.targetVerified, false)
+        // First chord fully released (left-Command down, a down, a up, left-Command up).
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .targetedKeyDown(0x37, .maskCommand, 42),
+            .targetedKeyDown(0x00, .maskCommand, 42),
+            .targetedKeyUp(0x00, .maskCommand, 42),
+            .targetedKeyUp(0x37, [], 42),
+        ])
+        XCTAssertTrue(env.fakeWorkspace.activatedPIDs.isEmpty)
+    }
+
+    func testForegroundBehaviorUnchangedUsesGlobalLane() throws {
+        // Already-frontmost keyboard still uses the global synthesizer methods (not targeted).
+        let env = readyEnvironment(frontmostPID: 42)
+        let result = try executor().executeFallback(pressA(), target: fallbackTarget(interference: .backgroundOnly), environment: env)
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertEqual(result.targetVerified, true)
+        XCTAssertEqual(env.fakeSynthesizer.events, [.keyDown(0x00, []), .keyUp(0x00, [])])
+        XCTAssertFalse(env.fakeSynthesizer.events.contains { event in
+            if case .targetedKeyDown = event { return true }
+            if case .targetedKeyUp = event { return true }
+            return false
+        }, "frontmost delivery stays on the global lane")
     }
 
     func testBackgroundOnlyFrontmostDelivers() throws {
@@ -198,7 +383,7 @@ final class FallbackExecutorTests: XCTestCase {
     func testCoordinateClickRestoresPointerAfterDelivery() throws {
         let env = readyEnvironment(frontmostPID: 42)
         env.fakeSynthesizer.reportedPointerLocation = CGPoint(x: 555, y: 444)
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         let result = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         XCTAssertEqual(result.status, .completed)
         XCTAssertEqual(env.fakeSynthesizer.events, [
@@ -224,7 +409,7 @@ final class FallbackExecutorTests: XCTestCase {
         let env = readyEnvironment(frontmostPID: 42)
         env.fakeSynthesizer.reportedPointerLocation = CGPoint(x: 555, y: 444)
         env.fakeSynthesizer.onEmit = { env.monitor.observe(isOurs: false, at: 1.0) }
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         let result = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         XCTAssertEqual(result.status, .interrupted)
         XCTAssertFalse(env.fakeSynthesizer.events.contains { event in
@@ -236,7 +421,7 @@ final class FallbackExecutorTests: XCTestCase {
     func testUnreadablePointerLocationSkipsRestore() throws {
         let env = readyEnvironment(frontmostPID: 42)
         env.fakeSynthesizer.reportedPointerLocation = nil
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         let result = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         XCTAssertEqual(result.status, .completed)
         XCTAssertEqual(env.fakeSynthesizer.events, [
@@ -250,7 +435,7 @@ final class FallbackExecutorTests: XCTestCase {
     func testCoordinateClickOutsideWindowIsRejected() {
         let env = readyEnvironment(frontmostPID: 42) // frame (100,200,400,300)
         // Window point (1000,20) → global (1100,220): far outside the 400-wide window.
-        let action = FallbackAction.coordinateClick(at: Point(x: 1000, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 1000, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(), environment: env)) { error in
             guard case CUError.windowNotFound = error else { return XCTFail("expected windowNotFound") }
         }
@@ -260,7 +445,7 @@ final class FallbackExecutorTests: XCTestCase {
     func testCoordinateClickWhenWindowGoneIsRejected() {
         let env = readyEnvironment(frontmostPID: 42)
         env.missingCurrentFrames.insert("s1") // window closed / off-screen since capture
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(), environment: env)) { error in
             guard case CUError.windowNotFound = error else { return XCTFail("expected windowNotFound") }
         }
@@ -272,7 +457,7 @@ final class FallbackExecutorTests: XCTestCase {
         // The window jumped far away since capture; the mapped global point (110,220) is no
         // longer over the live window, so delivery is refused (would land on another app).
         env.currentFrames["s1"] = Rect(x: 900, y: 900, width: 400, height: 300)
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(), environment: env)) { error in
             guard case CUError.windowNotFound = error else { return XCTFail("expected windowNotFound") }
         }
@@ -283,7 +468,7 @@ final class FallbackExecutorTests: XCTestCase {
         let env = readyEnvironment(frontmostPID: 42)
         // Window unmoved (explicit current frame equals captured); an in-window point delivers.
         env.currentFrames["s1"] = Rect(x: 100, y: 200, width: 400, height: 300)
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         let result = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         XCTAssertEqual(result.status, .completed)
         XCTAssertEqual(env.fakeSynthesizer.events.first, .mouseDown(CGPoint(x: 110, y: 220), .left))
@@ -303,7 +488,7 @@ final class FallbackExecutorTests: XCTestCase {
     func testCoordinateClickWindowSpaceMapsToGlobal() throws {
         let env = readyEnvironment(frontmostPID: 42)
         // Window point (10,20) with frame origin (100,200) → global (110,220).
-        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 1)
         let result = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         XCTAssertEqual(result.status, .completed)
         XCTAssertEqual(result.method, .pointer)
@@ -317,7 +502,7 @@ final class FallbackExecutorTests: XCTestCase {
         let env = readyEnvironment(frontmostPID: 42)
         // Screenshot pixel (400,300) with 800×600 px over a 400×300 pt frame at (100,200):
         // kx=ky=2 → window (200,150) → global (300,350).
-        let action = FallbackAction.coordinateClick(at: Point(x: 400, y: 300), space: .screenshot, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 400, y: 300), space: .screenshot, button: .left, modifiers: [], clickCount: 1)
         _ = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
         guard case let .mouseDown(point, _) = env.fakeSynthesizer.events.first else {
             return XCTFail("expected a mouseDown")
@@ -327,7 +512,7 @@ final class FallbackExecutorTests: XCTestCase {
 
     func testCoordinateClickWithoutGeometryYieldsWindowNotFound() {
         let env = readyEnvironment(frontmostPID: 42, geometry: nil)
-        let action = FallbackAction.coordinateClick(at: Point(x: 1, y: 1), space: .window, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 1, y: 1), space: .window, button: .left, modifiers: [], clickCount: 1)
         XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(), environment: env)) { error in
             guard case CUError.windowNotFound = error else { return XCTFail("expected windowNotFound") }
         }
@@ -335,7 +520,7 @@ final class FallbackExecutorTests: XCTestCase {
 
     func testScreenshotSpaceWithoutScreenshotPixelsYieldsWindowNotFound() {
         let env = readyEnvironment(frontmostPID: 42, geometry: fixtureGeometry(screenshotPixels: nil))
-        let action = FallbackAction.coordinateClick(at: Point(x: 1, y: 1), space: .screenshot, button: .left, modifiers: [])
+        let action = FallbackAction.coordinateClick(at: Point(x: 1, y: 1), space: .screenshot, button: .left, modifiers: [], clickCount: 1)
         XCTAssertThrowsError(try executor().executeFallback(action, target: fallbackTarget(), environment: env)) { error in
             guard case CUError.windowNotFound = error else { return XCTFail("expected windowNotFound") }
         }
@@ -430,5 +615,42 @@ final class FallbackExecutorTests: XCTestCase {
         XCTAssertEqual(result.elementFocused, false, "never confirmed (delivery body never ran)")
         XCTAssertEqual(element.focusRequests, 0)
         XCTAssertTrue(env.fakeSynthesizer.events.isEmpty)
+    }
+
+
+    func testCoordinateDoubleClickEmitsTwoPairs() throws {
+        let env = readyEnvironment(frontmostPID: 42)
+        let action = FallbackAction.coordinateClick(
+            at: Point(x: 10, y: 20), space: .window, button: .left, modifiers: [], clickCount: 2
+        )
+        _ = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .mouseDown(CGPoint(x: 110, y: 220), .left),
+            .mouseUp(CGPoint(x: 110, y: 220), .left),
+            .mouseDown(CGPoint(x: 110, y: 220), .left),
+            .mouseUp(CGPoint(x: 110, y: 220), .left),
+        ])
+    }
+
+    func testCoordinateMiddleClickUsesMiddleButton() throws {
+        let env = readyEnvironment(frontmostPID: 42)
+        let action = FallbackAction.coordinateClick(
+            at: Point(x: 10, y: 20), space: .window, button: .middle, modifiers: [], clickCount: 1
+        )
+        _ = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
+        XCTAssertEqual(env.fakeSynthesizer.events, [
+            .mouseDown(CGPoint(x: 110, y: 220), .middle),
+            .mouseUp(CGPoint(x: 110, y: 220), .middle),
+        ])
+    }
+
+    func testCoordinateFractionalPageScroll() throws {
+        let env = readyEnvironment(frontmostPID: 42)
+        let action = FallbackAction.coordinateScroll(
+            at: Point(x: 0, y: 0), space: .window, direction: .down, by: .page, count: 0.5
+        )
+        _ = try executor().executeFallback(action, target: fallbackTarget(), environment: env)
+        // half page = 5 line units
+        XCTAssertEqual(env.fakeSynthesizer.events, [.scroll(CGPoint(x: 100, y: 200), 0, -5)])
     }
 }

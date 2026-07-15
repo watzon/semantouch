@@ -23,7 +23,12 @@ public enum ToolCatalog {
         // Phase 1 — enabled now.
         ToolDescriptorInfo(name: "doctor", phase: 1, enabledNow: true),
         ToolDescriptorInfo(name: "list_apps", phase: 1, enabledNow: true),
+        // Explicit lifecycle launch/recovery — never implied by ordinary app resolution.
+        ToolDescriptorInfo(name: "launch_app", phase: 1, enabledNow: true),
         ToolDescriptorInfo(name: "get_app_state", phase: 1, enabledNow: true),
+        // Full-text read of one revision-checked element (bypasses the 256-byte tree field cap).
+        // Grouped with get_app_state: same ElementTarget quadruple, never advances revision.
+        ToolDescriptorInfo(name: "read_text", phase: 1, enabledNow: true),
         // v1.5 (§18.9) — read-only capture-only tool. Grouped with get_app_state (the two
         // window-observation tools): captures the window as a JPEG without an accessibility
         // tree and does not advance the revision.

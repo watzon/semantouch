@@ -15,17 +15,23 @@ import ComputerUseCore
 /// (§4.3, §16). Keycodes are the stable ANSI `kVK_*` values written as literals so the
 /// engine does not depend on Carbon being importable; the wire token grammar is stable.
 public enum Keymap {
-    /// Named modifier tokens → CoreGraphics flags.
+    /// Named modifier tokens → CoreGraphics flags. Includes common xdotool aliases
+    /// (`super`/`meta` → cmd, `control` → ctrl, `alt` → opt), looked up case-insensitively.
     public static let modifiers: [String: CGEventFlags] = [
         "cmd": .maskCommand,
+        "super": .maskCommand,
+        "meta": .maskCommand,
         "ctrl": .maskControl,
+        "control": .maskControl,
         "opt": .maskAlternate,
+        "alt": .maskAlternate,
         "shift": .maskShift,
         "fn": .maskSecondaryFn,
     ]
 
-    /// Key token → ANSI virtual keycode. Lowercase named keys, digits, letters, and the
-    /// common editing/navigation/function keys (§4.3).
+    /// Key token → ANSI virtual keycode. Lowercase named keys, digits, letters, common
+    /// editing/navigation/function keys (§4.3), plus case-insensitive xdotool aliases
+    /// (`Page_Up`, `KP_0`…`KP_9`, `KP_Enter`, keypad ops, `Insert`, `Delete`).
     public static let keys: [String: CGKeyCode] = {
         var map: [String: CGKeyCode] = [:]
         // Letters (kVK_ANSI_*).
@@ -49,30 +55,49 @@ public enum Keymap {
             ("\\", 0x2A), (",", 0x2B), ("/", 0x2C), (".", 0x2F), ("`", 0x32),
         ]
         for (name, code) in punct { map[name] = code }
-        // Named keys.
+        // Named keys + xdotool aliases. Tokens are stored lowercased; lookup lowercases
+        // the wire token so `Page_Up`, `PAGE_UP`, and `page_up` all resolve.
         let named: [(String, CGKeyCode)] = [
             ("enter", 0x24), ("return", 0x24),
             ("tab", 0x30),
             ("space", 0x31),
+            // Backspace-class (legacy tokens kept). Case-insensitive xdotool `Delete`
+            // also lands here via lowercasing (old token semantics retained).
             ("delete", 0x33), ("backspace", 0x33),
+            // Forward-delete class (legacy + explicit alias).
             ("forwarddelete", 0x75),
             ("esc", 0x35), ("escape", 0x35),
-            ("home", 0x73), ("end", 0x77), ("pageup", 0x74), ("pagedown", 0x79),
+            ("home", 0x73), ("end", 0x77),
+            ("pageup", 0x74), ("page_up", 0x74),
+            ("pagedown", 0x79), ("page_down", 0x79),
             ("left", 0x7B), ("right", 0x7C), ("down", 0x7D), ("up", 0x7E),
+            ("insert", 0x72), // kVK_Help / Insert on many layouts
             ("f1", 0x7A), ("f2", 0x78), ("f3", 0x63), ("f4", 0x76), ("f5", 0x60),
             ("f6", 0x61), ("f7", 0x62), ("f8", 0x64), ("f9", 0x65), ("f10", 0x6D),
             ("f11", 0x67), ("f12", 0x6F),
+            // Keypad (xdotool KP_*).
+            ("kp_0", 0x52), ("kp_1", 0x53), ("kp_2", 0x54), ("kp_3", 0x55),
+            ("kp_4", 0x56), ("kp_5", 0x57), ("kp_6", 0x58), ("kp_7", 0x59),
+            ("kp_8", 0x5B), ("kp_9", 0x5C),
+            ("kp_enter", 0x4C),
+            ("kp_decimal", 0x41),
+            ("kp_multiply", 0x43),
+            ("kp_add", 0x45),
+            ("kp_subtract", 0x4E),
+            ("kp_divide", 0x4B),
+            ("kp_equal", 0x51),
         ]
         for (name, code) in named { map[name] = code }
         return map
     }()
 
     /// The keycode for a key token, or `nil` when unknown.
+    /// Lookup is case-insensitive; underscores are preserved (`Page_Up` → `page_up`).
     public static func keyCode(for token: String) -> CGKeyCode? { keys[token.lowercased()] }
 
     /// The modifier flag for a modifier token, or `nil` when it is not a modifier.
+    /// Lookup is case-insensitive (`Super`, `META`, `Control`, `ALT` all resolve).
     public static func modifier(for token: String) -> CGEventFlags? { modifiers[token.lowercased()] }
-
     /// The virtual keycode that produces the `flagsChanged` event for each modifier flag,
     /// in a stable press order (release is the reverse). Left-hand ANSI `kVK_*` values.
     ///

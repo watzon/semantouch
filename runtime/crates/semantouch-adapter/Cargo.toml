@@ -1,0 +1,12 @@
+[package]
+name = "semantouch-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neutral platform adapter contract for Semantouch coordinators"
+publish = false
+
+[dependencies]
+semantouch-protocol = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

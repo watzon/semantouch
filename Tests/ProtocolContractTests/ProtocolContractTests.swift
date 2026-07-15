@@ -16,7 +16,7 @@ final class ProtocolContractTests: XCTestCase {
     func testAllDefinedToolsAreEnabled() {
         XCTAssertEqual(
             ToolCatalog.enabledNames,
-            ["doctor", "list_apps", "get_app_state", "screenshot", "end_app_session",
+            ["doctor", "list_apps", "launch_app", "get_app_state", "read_text", "screenshot", "end_app_session",
              "click", "perform_action", "set_value", "select_text", "scroll",
              "press_key", "type_text", "drag", "wait_for"]
         )
@@ -36,7 +36,7 @@ final class ProtocolContractTests: XCTestCase {
     }
 
     func testCatalogCoversAllDefinedTools() {
-        XCTAssertEqual(ToolCatalog.all.count, 14)
+        XCTAssertEqual(ToolCatalog.all.count, 16)
     }
 
     func testProtocolVersionIsFrozen() {
@@ -51,10 +51,10 @@ final class ProtocolContractTests: XCTestCase {
         let response = try parse(server.process(request(id: 1, method: "tools/list")))
         let tools = try XCTUnwrap(response["result"]?["tools"]?.arrayValue)
 
-        // Exactly the fourteen enabled tools (Phase 1 + v1.5 screenshot + Phase 2 + Phase 4 +
-        // v1.5 wait_for), in table order.
+        // Exactly the sixteen enabled tools (Phase 1 + read_text + v1.5 screenshot + Phase 2 +
+        // Phase 4 + v1.5 wait_for + launch_app), in table order.
         XCTAssertEqual(tools.compactMap { $0["name"]?.stringValue },
-                       ["doctor", "list_apps", "get_app_state", "screenshot", "end_app_session",
+                       ["doctor", "list_apps", "launch_app", "get_app_state", "read_text", "screenshot", "end_app_session",
                         "click", "perform_action", "set_value", "select_text", "scroll",
                         "press_key", "type_text", "drag", "wait_for"])
 
@@ -92,43 +92,39 @@ final class ProtocolContractTests: XCTestCase {
             return (name, schema)
         })
 
-        // click carries the ElementTarget (semantic path) plus the Phase 4 coordinate
-        // fallback fields (§16): app+sessionId required, revision/elementId optional (the
-        // semantic path is validated in the handler), plus at/space/button/modifiers/interference.
+        // click carries ElementTarget + coordinate fallback + shared SnapshotOptions.
         let click = try XCTUnwrap(byName["click"])
         XCTAssertEqual(
             click.serialized(),
-            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"at":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"button":{"default":"left","enum":["left","right"]},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"modifiers":{"items":{"enum":["cmd","ctrl","opt","shift","fn"]},"type":"array"},"revision":{"minimum":1,"type":"integer"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]}},"required":["app","sessionId"],"type":"object"}"#
+            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"at":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"button":{"default":"left","enum":["left","middle","right"]},"clickCount":{"default":1,"maximum":3,"minimum":1,"type":"integer"},"disableDiff":{"default":false,"type":"boolean"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"forceFullTree":{"default":false,"type":"boolean"},"includeScreenshot":{"default":"auto","enum":["auto","always","never"]},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"maxNodes":{"description":"Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.","maximum":2000,"minimum":1,"type":"integer"},"modifiers":{"items":{"enum":["cmd","ctrl","opt","shift","fn"]},"type":"array"},"revision":{"minimum":1,"type":"integer"},"scopeElementId":{"description":"Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.","pattern":"^e[0-9]+$","type":"string"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]},"windowId":{"description":"Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.","minimum":0,"type":"integer"}},"required":["app","sessionId"],"type":"object"}"#
         )
 
-        // set_value adds a string|number|boolean value plus the optional v1.5 commit flag (§18.5).
+        // set_value adds value + optional commit, plus SnapshotOptions.
         let setValue = try XCTUnwrap(byName["set_value"])
         XCTAssertEqual(
             setValue.serialized(),
-            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"commit":{"default":false,"type":"boolean"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"revision":{"minimum":1,"type":"integer"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"value":{"type":["string","number","boolean"]}},"required":["app","sessionId","revision","elementId","value"],"type":"object"}"#
+            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"commit":{"default":false,"type":"boolean"},"disableDiff":{"default":false,"type":"boolean"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"forceFullTree":{"default":false,"type":"boolean"},"includeScreenshot":{"default":"auto","enum":["auto","always","never"]},"maxNodes":{"description":"Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.","maximum":2000,"minimum":1,"type":"integer"},"revision":{"minimum":1,"type":"integer"},"scopeElementId":{"description":"Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.","pattern":"^e[0-9]+$","type":"string"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"value":{"type":["string","number","boolean"]},"windowId":{"description":"Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.","minimum":0,"type":"integer"}},"required":["app","sessionId","revision","elementId","value"],"type":"object"}"#
         )
 
-        // scroll adds direction/by/count plus the Phase 4 coordinate fields (at/space/interference);
-        // only app+sessionId+direction are required (semantic vs coordinate dispatched on `at`).
+        // scroll adds direction/by/count + coordinate fields + SnapshotOptions.
         let scroll = try XCTUnwrap(byName["scroll"])
         XCTAssertEqual(
             scroll.serialized(),
-            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"at":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"by":{"default":"line","enum":["line","page"]},"count":{"default":1,"minimum":1,"type":"integer"},"direction":{"enum":["up","down","left","right"]},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"revision":{"minimum":1,"type":"integer"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]}},"required":["app","sessionId","direction"],"type":"object"}"#
+            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"at":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"by":{"default":"line","enum":["line","page"]},"count":{"default":1,"minimum":0,"type":"number"},"direction":{"enum":["up","down","left","right"]},"disableDiff":{"default":false,"type":"boolean"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"forceFullTree":{"default":false,"type":"boolean"},"includeScreenshot":{"default":"auto","enum":["auto","always","never"]},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"maxNodes":{"description":"Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.","maximum":2000,"minimum":1,"type":"integer"},"revision":{"minimum":1,"type":"integer"},"scopeElementId":{"description":"Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.","pattern":"^e[0-9]+$","type":"string"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]},"windowId":{"description":"Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.","minimum":0,"type":"integer"}},"required":["app","sessionId","direction"],"type":"object"}"#
         )
 
-        // press_key: app+sessionId+combo required, optional interference plus the v1.5
-        // element-targeting pair (revision+elementId, §18.6).
+        // press_key: combo + interference + element pair + SnapshotOptions.
         let pressKey = try XCTUnwrap(byName["press_key"])
         XCTAssertEqual(
             pressKey.serialized(),
-            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"combo":{"type":"string"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"revision":{"minimum":1,"type":"integer"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"}},"required":["app","sessionId","combo"],"type":"object"}"#
+            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"combo":{"type":"string"},"disableDiff":{"default":false,"type":"boolean"},"elementId":{"pattern":"^e[0-9]+$","type":"string"},"forceFullTree":{"default":false,"type":"boolean"},"includeScreenshot":{"default":"auto","enum":["auto","always","never"]},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"maxNodes":{"description":"Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.","maximum":2000,"minimum":1,"type":"integer"},"revision":{"minimum":1,"type":"integer"},"scopeElementId":{"description":"Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.","pattern":"^e[0-9]+$","type":"string"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"windowId":{"description":"Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.","minimum":0,"type":"integer"}},"required":["app","sessionId","combo"],"type":"object"}"#
         )
 
-        // drag: app+sessionId+from+to required, plus space/button/modifiers/interference.
+        // drag: from/to + coordinate fields + SnapshotOptions.
         let drag = try XCTUnwrap(byName["drag"])
         XCTAssertEqual(
             drag.serialized(),
-            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"button":{"default":"left","enum":["left","right"]},"from":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"modifiers":{"items":{"enum":["cmd","ctrl","opt","shift","fn"]},"type":"array"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]},"to":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"}},"required":["app","sessionId","from","to"],"type":"object"}"#
+            #"{"additionalProperties":false,"properties":{"app":{"type":"string"},"button":{"default":"left","enum":["left","middle","right"]},"disableDiff":{"default":false,"type":"boolean"},"forceFullTree":{"default":false,"type":"boolean"},"from":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"includeScreenshot":{"default":"auto","enum":["auto","always","never"]},"interference":{"default":"background-only","enum":["background-only","allow-brief-focus","foreground-takeover"]},"maxNodes":{"description":"Optional: raise this snapshot's emitted-node budget (default 600, hard max 2000) when a large tree truncates. Prefer scopeElementId for deep pages.","maximum":2000,"minimum":1,"type":"integer"},"modifiers":{"items":{"enum":["cmd","ctrl","opt","shift","fn"]},"type":"array"},"scopeElementId":{"description":"Optional: re-walk the tree rooted at this element (e.g. a web area) instead of the window. Only meaningful with an element id copied from THIS session's CURRENT snapshot. An id that cannot be honored is ignored: the server returns a full unscoped snapshot with a scope_ignored warning — copy fresh ids from that tree, then scope. An honored scoped snapshot retires all other element ids.","pattern":"^e[0-9]+$","type":"string"},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"space":{"default":"window","enum":["window","screenshot"]},"to":{"additionalProperties":false,"properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"],"type":"object"},"windowId":{"description":"Optional WindowServer id from an earlier get_app_state window.id. Omit or pass 0 to auto-select. Never use list_apps.windows or a zero-based window index.","minimum":0,"type":"integer"}},"required":["app","sessionId","from","to"],"type":"object"}"#
         )
 
         // wait_for (§18.7): app+sessionId+conditions required; conditions is a 1–4 array of the
@@ -138,6 +134,202 @@ final class ProtocolContractTests: XCTestCase {
             waitFor.serialized(),
             ##"{"additionalProperties":false,"definitions":{"Condition":{"properties":{"from":{"type":"string"},"kind":{"enum":["title_changed","title_contains","url_changed","url_contains","element_exists","element_gone"]},"role":{"type":"string"},"titleContains":{"type":"string"},"value":{"type":"string"},"valueContains":{"type":"string"}},"required":["kind"],"type":"object"}},"properties":{"app":{"type":"string"},"conditions":{"items":{"$ref":"#/definitions/Condition"},"maxItems":4,"minItems":1,"type":"array"},"mode":{"default":"all","enum":["all","any"]},"sessionId":{"pattern":"^s[0-9]+$","type":"string"},"timeoutMs":{"default":5000,"maximum":30000,"minimum":100,"type":"integer"}},"required":["app","sessionId","conditions"],"type":"object"}"##
         )
+    }
+
+
+    // MARK: - Action-attached state + SnapshotOptions (M1)
+
+    func testActionResultOmitsStateWhenNil() throws {
+        // Additive `state` must be omit-when-nil so pre-M1 clients see byte-identical results.
+        let result = ActionResult(
+            status: .completed,
+            method: .accessibility,
+            stateChanged: true,
+            refreshRecommended: true
+        )
+        XCTAssertEqual(
+            try CanonicalJSON.encodeToString(result),
+            #"{"method":"accessibility","refreshRecommended":true,"stateChanged":true,"status":"completed"}"#
+        )
+        XCTAssertNil(result.state)
+    }
+
+    func testActionResultStateAttachmentShape() throws {
+        let state = AppState(
+            sessionId: "s1",
+            app: AppSummary(id: "com.example", displayName: "Example", isRunning: true, windows: 1),
+            window: .init(id: 7, title: "Main", framePoints: Rect(x: 0, y: 0, width: 100, height: 80), scale: 2.0),
+            revision: 2,
+            full: false,
+            baseRevision: 1,
+            tree: .init(text: "+ e1 AXButton \"OK\"", nodeCount: 1, truncated: false)
+        )
+        let result = ActionResult(
+            status: .completed,
+            method: .accessibility,
+            stateChanged: true,
+            refreshRecommended: false,
+            state: state
+        )
+        let wire = try JSONValue.parse(try CanonicalJSON.encodeToString(result))
+        XCTAssertEqual(wire["status"]?.stringValue, "completed")
+        XCTAssertEqual(wire["refreshRecommended"]?.boolValue, false)
+        XCTAssertEqual(wire["state"]?["sessionId"]?.stringValue, "s1")
+        XCTAssertEqual(wire["state"]?["revision"]?.intValue, 2)
+        XCTAssertEqual(wire["state"]?["full"]?.boolValue, false)
+        XCTAssertEqual(wire["state"]?["baseRevision"]?.intValue, 1)
+        XCTAssertEqual(wire["state"]?["tree"]?["text"]?.stringValue, "+ e1 AXButton \"OK\"")
+        // Screenshot bytes are never embedded in ActionResult JSON.
+        XCTAssertNil(wire["state"]?["screenshot"]?.objectValue)
+    }
+
+    func testSnapshotOptionsDefaultsAndCascade() throws {
+        // Omitted keys decode to get_app_state defaults; extra action keys are ignored.
+        let options = try CanonicalJSON.decode(
+            SnapshotOptions.self,
+            from: #"{"app":"x","sessionId":"s1","revision":1,"elementId":"e1","maxNodes":1200,"windowId":0}"#
+        )
+        XCTAssertNil(options.windowId, "windowId 0 normalizes to nil (auto-select)")
+        XCTAssertFalse(options.forceFullTree)
+        XCTAssertFalse(options.disableDiff)
+        XCTAssertEqual(options.includeScreenshot, .auto)
+        XCTAssertNil(options.scopeElementId)
+        XCTAssertEqual(options.maxNodes, 1200)
+
+        let request = options.asGetAppStateRequest(app: "computer-use-fixture")
+        XCTAssertEqual(request.app, "computer-use-fixture")
+        XCTAssertEqual(request.maxNodes, 1200)
+        XCTAssertEqual(request.includeScreenshot, .auto)
+        XCTAssertEqual(request.snapshotOptions, options)
+
+        let explicit = try CanonicalJSON.decode(
+            SnapshotOptions.self,
+            from: #"{"forceFullTree":true,"disableDiff":true,"includeScreenshot":"never","scopeElementId":"e9","windowId":42}"#
+        )
+        XCTAssertEqual(explicit.windowId, 42)
+        XCTAssertTrue(explicit.forceFullTree)
+        XCTAssertTrue(explicit.disableDiff)
+        XCTAssertEqual(explicit.includeScreenshot, .never)
+        XCTAssertEqual(explicit.scopeElementId, "e9")
+        XCTAssertTrue(explicit.suppressesDiff)
+        XCTAssertTrue(explicit.isScoped)
+    }
+
+    func testGetAppStateRequestReusesSnapshotOptionsSemantics() throws {
+        let request = try CanonicalJSON.decode(
+            GetAppStateRequest.self,
+            from: #"{"app":"Aside","windowId":0,"maxNodes":900}"#
+        )
+        XCTAssertEqual(request.app, "Aside")
+        XCTAssertNil(request.windowId)
+        XCTAssertEqual(request.maxNodes, 900)
+        XCTAssertEqual(request.snapshotOptions.maxNodes, 900)
+        XCTAssertFalse(request.forceFullTree)
+        // Flat wire shape: no nested "options" object.
+        let reencoded = try JSONValue.parse(try CanonicalJSON.encodeToString(request))
+        XCTAssertNil(reencoded["snapshotOptions"])
+        XCTAssertEqual(reencoded["app"]?.stringValue, "Aside")
+        XCTAssertEqual(reencoded["maxNodes"]?.intValue, 900)
+    }
+
+    func testMutatingToolSchemasAcceptSharedSnapshotFields() throws {
+        let server = makeServer()
+        initialize(server)
+        // Shared observation fields are accepted on a mutating tool (schema-valid).
+        // With a nonexistent app the handler reaches policy/app resolution and returns
+        // app_not_found — proving the shared fields cleared schema validation without
+        // weakening additionalProperties: false. (Session/stale checks come later.)
+        let args = #"{"app":"x","sessionId":"s1","revision":1,"elementId":"e1","includeScreenshot":"never","forceFullTree":true,"maxNodes":800,"windowId":0,"disableDiff":false}"#
+        let response = try parse(server.process(call(id: 200, name: "click", arguments: args)))
+        XCTAssertNil(response["error"], "shared snapshot fields must be schema-valid on click")
+        let payload = try toolErrorPayload(response)
+        XCTAssertEqual(payload["code"]?.stringValue, "app_not_found")
+
+        // Unknown property still rejected (additionalProperties: false preserved).
+        XCTAssertEqual(
+            try parse(server.process(call(id: 201, name: "click",
+                arguments: #"{"app":"x","sessionId":"s1","revision":1,"elementId":"e1","notAField":true}"#)))["error"]?["code"]?.intValue,
+            MCPServer.RPCErrorCode.invalidParams
+        )
+        // Out-of-range maxNodes rejected on actions the same as get_app_state.
+        XCTAssertEqual(
+            try parse(server.process(call(id: 202, name: "set_value",
+                arguments: #"{"app":"x","sessionId":"s1","revision":1,"elementId":"e1","value":"a","maxNodes":3000}"#)))["error"]?["code"]?.intValue,
+            MCPServer.RPCErrorCode.invalidParams
+        )
+        // press_key accepts shared fields too.
+        let pressArgs = #"{"app":"x","sessionId":"s1","combo":"cmd+a","includeScreenshot":"auto","scopeElementId":"e2"}"#
+        let press = try parse(server.process(call(id: 203, name: "press_key", arguments: pressArgs)))
+        XCTAssertNil(press["error"], "shared snapshot fields must be schema-valid on press_key")
+        XCTAssertEqual(try toolErrorPayload(press)["code"]?.stringValue, "app_not_found")
+    }
+
+    func testRejectedActionDoesNotAttachState() throws {
+        // A denied-app mutation short-circuits before any refresh; the tool-level error
+        // payload has no ActionResult.state (there is no ActionResult at all).
+        let blocked = AppRecord(bundleId: "com.example.blocked", displayName: "Blocked", path: nil, pid: 999, isRunning: true, windows: 1)
+        let (server, _) = actionServer(records: [blocked], deniedApps: ["com.example.blocked"])
+        let args = #"{"app":"com.example.blocked","sessionId":"s1","revision":1,"elementId":"e1","includeScreenshot":"always"}"#
+        let payload = try toolErrorPayload(try parse(server.process(call(id: 204, name: "click", arguments: args))))
+        XCTAssertEqual(payload["code"]?.stringValue, "policy_denied")
+        XCTAssertNil(payload["state"], "rejected actions never attach state")
+        XCTAssertNil(payload["status"], "rejected actions are tool errors, not ActionResult")
+    }
+
+    func testEncodeActionResultImageBlockIsSeparate() throws {
+        // Contract for separate image content: text JSON first, image second; state JSON
+        // never embeds screenshot bytes.
+        let result = ActionResult(
+            status: .completed,
+            method: .pointer,
+            stateChanged: false,
+            refreshRecommended: false,
+            focusChanged: false,
+            focusRestored: false,
+            targetVerified: true
+        )
+        let tool = try ToolHandlers.encodeActionResult(result, imageBase64: "Zm9v")
+        XCTAssertEqual(tool.content.count, 2)
+        guard case let .text(text) = tool.content[0] else {
+            return XCTFail("first content block must be text JSON")
+        }
+        guard case let .image(base64, mime) = tool.content[1] else {
+            return XCTFail("second content block must be the image")
+        }
+        XCTAssertEqual(base64, "Zm9v")
+        XCTAssertEqual(mime, "image/jpeg")
+        let wire = try JSONValue.parse(text)
+        XCTAssertNil(wire["state"])
+        XCTAssertEqual(wire["refreshRecommended"]?.boolValue, false)
+    }
+
+    func testPostActionRefreshFailurePreservesCommittedResult() throws {
+        // Non-cancellation refresh failure keeps the committed ActionResult, leaves state
+        // nil, preserves refreshRecommended, and appends a deterministic warning.
+        let committed = ActionResult(
+            status: .completed,
+            method: .keyboard,
+            stateChanged: false,
+            refreshRecommended: true,
+            warning: "partial",
+            focusChanged: false,
+            targetVerified: true
+        )
+        let degradedWarning = ToolHandlers.appendWarning(committed.warning, ToolHandlers.postActionRefreshFailedWarning)
+        XCTAssertEqual(
+            degradedWarning,
+            "partial Post-action state refresh failed; call get_app_state to observe the result."
+        )
+        var degraded = committed
+        degraded.state = nil
+        degraded.warning = degradedWarning
+        XCTAssertTrue(degraded.refreshRecommended)
+        XCTAssertNil(degraded.state)
+        let wire = try JSONValue.parse(try CanonicalJSON.encodeToString(degraded))
+        XCTAssertEqual(wire["status"]?.stringValue, "completed")
+        XCTAssertEqual(wire["refreshRecommended"]?.boolValue, true)
+        XCTAssertNil(wire["state"])
+        XCTAssertTrue((wire["warning"]?.stringValue ?? "").contains("Post-action state refresh failed"))
     }
 
     // MARK: - v1.5 wait_for validation + gates (§18.7)
@@ -437,6 +629,69 @@ final class ProtocolContractTests: XCTestCase {
         // Window point (10,20) + frame origin (100,200) → global (110,220).
         let point = try XCTUnwrap(synth.firstMouseDown)
         XCTAssertEqual(point, CGPoint(x: 110, y: 220))
+    }
+
+    
+    func testClickCountAndMiddleButtonSchemaBounds() throws {
+        let (server, _, _) = fallbackServer(records: [fixtureRecord()], frontmostPID: 4242)
+        // clickCount default accepted (omit).
+        let ok = try parse(server.process(call(id: 900, name: "click",
+            arguments: #"{"app":"computer-use-fixture","sessionId":"s1","at":{"x":1,"y":1}}"#)))
+        // may fail later for session/geometry; must not be schema invalidParams for missing clickCount
+        if let code = ok["error"]?["code"]?.intValue {
+            XCTAssertNotEqual(code, MCPServer.RPCErrorCode.invalidParams, "omitted clickCount must default")
+        }
+        // clickCount 0 rejected by schema minimum 1.
+        XCTAssertEqual(
+            try parse(server.process(call(id: 901, name: "click",
+                arguments: #"{"app":"x","sessionId":"s1","at":{"x":1,"y":1},"clickCount":0}"#)))["error"]?["code"]?.intValue,
+            MCPServer.RPCErrorCode.invalidParams
+        )
+        // clickCount 4 rejected by schema maximum 3.
+        XCTAssertEqual(
+            try parse(server.process(call(id: 902, name: "click",
+                arguments: #"{"app":"x","sessionId":"s1","at":{"x":1,"y":1},"clickCount":4}"#)))["error"]?["code"]?.intValue,
+            MCPServer.RPCErrorCode.invalidParams
+        )
+        // middle button accepted by schema (may fail later for app/session).
+        let mid = try parse(server.process(call(id: 903, name: "click",
+            arguments: #"{"app":"x","sessionId":"s1","at":{"x":1,"y":1},"button":"middle"}"#)))
+        if let code = mid["error"]?["code"]?.intValue {
+            XCTAssertNotEqual(code, MCPServer.RPCErrorCode.invalidParams, "middle must be schema-valid")
+        }
+        // unknown button rejected.
+        XCTAssertEqual(
+            try parse(server.process(call(id: 904, name: "click",
+                arguments: #"{"app":"x","sessionId":"s1","at":{"x":1,"y":1},"button":"side"}"#)))["error"]?["code"]?.intValue,
+            MCPServer.RPCErrorCode.invalidParams
+        )
+    }
+
+    func testScrollCountAcceptsFractionalNumber() throws {
+        let (server, _, _) = fallbackServer(records: [fixtureRecord()], frontmostPID: 4242)
+        // Fractional count is schema-valid (type number).
+        let frac = try parse(server.process(call(id: 910, name: "scroll",
+            arguments: #"{"app":"x","sessionId":"s1","direction":"down","by":"page","count":0.5,"at":{"x":1,"y":1}}"#)))
+        if let code = frac["error"]?["code"]?.intValue {
+            XCTAssertNotEqual(code, MCPServer.RPCErrorCode.invalidParams, "fractional count must be schema-valid")
+        }
+        // Integer count still schema-valid.
+        let integ = try parse(server.process(call(id: 911, name: "scroll",
+            arguments: #"{"app":"x","sessionId":"s1","direction":"down","count":2,"at":{"x":1,"y":1}}"#)))
+        if let code = integ["error"]?["code"]?.intValue {
+            XCTAssertNotEqual(code, MCPServer.RPCErrorCode.invalidParams, "integer count must remain valid")
+        }
+        // count 0 rejected by handler (>0) — schema minimum is 0 inclusive, so either
+        // invalidParams from handler ToolInvalidArguments or a later error is fine as long as
+        // it is not a successful scroll.
+        let zero = try parse(server.process(call(id: 912, name: "scroll",
+            arguments: #"{"app":"computer-use-fixture","sessionId":"s1","direction":"down","count":0,"at":{"x":1,"y":1}}"#)))
+        XCTAssertNotNil(zero["error"] ?? zero["result"], "zero count must not silently succeed as a scroll")
+        if zero["error"] == nil {
+            // tool-level error inside result
+            let payload = try? toolErrorPayload(zero)
+            XCTAssertNotNil(payload)
+        }
     }
 
     func testSemanticClickStillTakesElementPathWithoutAt() throws {

@@ -1,58 +1,771 @@
 #!/bin/sh
+# Deterministic launcher for the nested public relay inside Semantouch.app.
+#
+# Preference order (after full verification):
+#   1. /Applications/Semantouch.app
+#   2. ~/Applications/Semantouch.app
+# Warns when both exist and verify, then uses the preferred (system) install.
+#
+# If neither verified install is present, downloads the versioned signed app ZIP
+# for this plugin version, preflights the archive, verifies SHA-256, extracts
+# with containment checks, verifies the staged app, installs to
+# ~/Applications/Semantouch.app with serialized same-volume atomic cutover
+# (backup retained through post-install verification + rollback), and execs
+# only Contents/MacOS/semantouch.
+#
+# Never falls back to a raw helper binary or an unrestricted production
+# SEMANTOUCH_BIN bypass. Existing canonical installs that fail verification
+# fail closed (no silent replacement).
 set -eu
 
-if [ -n "${SEMANTOUCH_BIN:-}" ]; then
-  exec "$SEMANTOUCH_BIN" "$@"
-fi
-
 plugin_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-bundled_binary="$plugin_root/bin/semantouch"
-if [ -x "$bundled_binary" ]; then
-  exec "$bundled_binary" "$@"
+package_json="$plugin_root/package.json"
+
+expected_bundle_id="tech.watzon.semantouch"
+expected_relay_id="tech.watzon.semantouch.cli"
+expected_team="MB5789APU7"
+expected_authority="Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
+expected_executable="SemantouchHost"
+expected_relay="semantouch"
+expected_min_os="14.0"
+expected_package_type="APPL"
+expected_archs="arm64 x86_64"
+app_name="Semantouch.app"
+relay_rel="Contents/MacOS/semantouch"
+host_rel="Contents/MacOS/SemantouchHost"
+info_rel="Contents/Info.plist"
+
+# Production launches always require codesign, notarization, and Gatekeeper.
+# The source-only harness may opt into fake-app seams; release plugin archives
+# contain this launcher but not the harness marker, so these variables cannot
+# weaken a shipped launcher.
+test_seams=0
+if [ "${SEMANTOUCH_ENABLE_TEST_SEAMS:-0}" = "1" ] \
+  && [ -f "$plugin_root/scripts/tests/launcher-hardening.test.mjs" ]; then
+  test_seams=1
+fi
+if { [ "${SEMANTOUCH_SKIP_NOTARIZATION:-0}" = "1" ] \
+  || [ "${SEMANTOUCH_SKIP_CODESIGN:-0}" = "1" ]; } \
+  && [ "$test_seams" -ne 1 ]; then
+  printf '%s\n' "semantouch: test-only verification bypass refused by production launcher" >&2
+  exit 1
 fi
 
-package_json="$plugin_root/package.json"
-version=$(/usr/bin/awk -F '"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$package_json")
+require_notarization=1
+require_codesign=1
+if [ "$test_seams" -eq 1 ]; then
+  if [ "${SEMANTOUCH_SKIP_NOTARIZATION:-0}" = "1" ]; then
+    require_notarization=0
+  fi
+  if [ "${SEMANTOUCH_SKIP_CODESIGN:-0}" = "1" ]; then
+    require_codesign=0
+    require_notarization=0
+  fi
+fi
 
-if [ -z "$version" ]; then
-  printf '%s\n' "semantouch: could not read the plugin version from $package_json" >&2
+die() {
+  printf '%s\n' "semantouch: $*" >&2
   exit 1
+}
+
+warn() {
+  printf '%s\n' "semantouch: warning: $*" >&2
+}
+
+version=$(/usr/bin/awk -F '"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$package_json" 2>/dev/null || true)
+if [ -z "$version" ]; then
+  die "could not read the plugin version from $package_json"
 fi
 
 architecture=$(/usr/bin/uname -m)
-if [ "$architecture" != "arm64" ]; then
-  printf '%s\n' "semantouch: release binaries do not support architecture $architecture (arm64 required)" >&2
-  exit 1
-fi
+case $architecture in
+  arm64|x86_64) ;;
+  *)
+    die "release app bundles do not support architecture $architecture (arm64/x86_64 universal2 required)"
+    ;;
+esac
 
 : "${HOME:?semantouch: HOME is not set}"
-asset="semantouch-macos-arm64"
-install_dir="${SEMANTOUCH_INSTALL_ROOT:-$HOME/Library/Application Support/Semantouch}/$version"
-binary="$install_dir/semantouch"
 
-if [ ! -x "$binary" ]; then
-  base_url="${SEMANTOUCH_RELEASE_BASE_URL:-https://github.com/watzon/semantouch/releases/download/v$version}"
-  temp_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch.XXXXXX")
-  trap '/bin/rm -rf "$temp_dir"' EXIT HUP INT TERM
+system_app="/Applications/$app_name"
+user_app="$HOME/Applications/$app_name"
+system_relay="$system_app/$relay_rel"
+user_relay="$user_app/$relay_rel"
+INSTALL_LOCK_DIR=""
+temp_dir=""
 
-  printf '%s\n' "semantouch: downloading v$version for macOS arm64" >&2
-  /usr/bin/curl --fail --location --silent --show-error \
-    "$base_url/$asset" --output "$temp_dir/$asset"
-  /usr/bin/curl --fail --location --silent --show-error \
-    "$base_url/$asset.sha256" --output "$temp_dir/$asset.sha256"
+# ---------------------------------------------------------------------------
+# Verification (self-contained; mirrors scripts/verify-app-release contract)
+# ---------------------------------------------------------------------------
 
-  expected=$(/usr/bin/awk 'NR == 1 { print $1 }' "$temp_dir/$asset.sha256")
-  actual=$(/usr/bin/shasum -a 256 "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')
-  if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
-    printf '%s\n' "semantouch: checksum verification failed for v$version" >&2
-    exit 1
+require_file() {
+  _path=$1
+  _label=$2
+  if [ ! -e "$_path" ]; then
+    die "$_label missing: $_path"
+  fi
+}
+
+require_macho_universal2() {
+  _path=$1
+  _label=$2
+
+  require_file "$_path" "$_label"
+  if [ ! -x "$_path" ]; then
+    die "$_label is not executable: $_path"
   fi
 
-  /bin/mkdir -p "$install_dir"
-  /usr/bin/install -m 0755 "$temp_dir/$asset" "$install_dir/.semantouch.$$"
-  /bin/mv -f "$install_dir/.semantouch.$$" "$binary"
-  /bin/rm -rf "$temp_dir"
-  trap - EXIT HUP INT TERM
+  # Test-only skip: allow non-Mach-O placeholders when codesign is skipped.
+  if [ "$require_codesign" -eq 0 ]; then
+    return 0
+  fi
+
+  _file_info=$(/usr/bin/file -b "$_path" 2>/dev/null || true)
+  case $_file_info in
+    *Mach-O*) ;;
+    *)
+      die "$_label is not a Mach-O executable: $_path ($_file_info)"
+      ;;
+  esac
+
+  _archs=$(/usr/bin/lipo -archs "$_path" 2>/dev/null || true)
+  if [ -z "$_archs" ]; then
+    die "could not read architecture for $_label: $_path"
+  fi
+
+  _normalized=$(printf '%s' "$_archs" | /usr/bin/tr -s '[:space:]' ' ' | /usr/bin/sed 's/^ //;s/ $//')
+  _has_arm64=0
+  _has_x86_64=0
+  for _arch in $_normalized; do
+    case $_arch in
+      arm64) _has_arm64=1 ;;
+      x86_64) _has_x86_64=1 ;;
+      *)
+        die "$_label has unexpected architecture slice: $_arch ($_path; archs=$_normalized)"
+        ;;
+    esac
+  done
+
+  if [ "$_has_arm64" -ne 1 ] || [ "$_has_x86_64" -ne 1 ]; then
+    die "$_label must be universal2 ($expected_archs), got: $_normalized ($_path)"
+  fi
+
+  _slice_count=$(printf '%s\n' $_normalized | /usr/bin/wc -w | /usr/bin/tr -d ' ')
+  if [ "$_slice_count" -ne 2 ]; then
+    die "$_label must contain exactly two architecture slices, got: $_normalized ($_path)"
+  fi
+}
+
+codesign_field() {
+  _details=$1
+  _field=$2
+  printf '%s\n' "$_details" | /usr/bin/awk -F= -v key="$_field" '
+    index($0, key "=") == 1 {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  '
+}
+
+inspect_signature() {
+  _path=$1
+  _label=$2
+  _expected_identifier=$3
+  _treat_as_bundle=$4
+  _scratch=$5
+
+  if [ "$require_codesign" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ "$_treat_as_bundle" = "yes" ]; then
+    _target=$_path
+  else
+    _temp_copy=$_scratch/$(basename -- "$_path").$$
+    /bin/cp "$_path" "$_temp_copy"
+    /bin/chmod u+w "$_temp_copy"
+    _target=$_temp_copy
+  fi
+
+  if [ "$_treat_as_bundle" = "yes" ]; then
+    if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$_target" >/dev/null 2>&1; then
+      /usr/bin/codesign --verify --deep --strict --verbose=4 "$_target" >&2 || true
+      die "$_label failed codesign verification: $_path"
+    fi
+  else
+    if ! /usr/bin/codesign --verify --strict --verbose=2 "$_target" >/dev/null 2>&1; then
+      /usr/bin/codesign --verify --strict --verbose=4 "$_target" >&2 || true
+      die "$_label failed codesign verification: $_path"
+    fi
+  fi
+
+  _details=$(/usr/bin/codesign --display --verbose=4 "$_target" 2>&1)
+  _identifier=$(codesign_field "$_details" "Identifier")
+  _team=$(codesign_field "$_details" "TeamIdentifier")
+  _authority=$(codesign_field "$_details" "Authority")
+  _flags=$(codesign_field "$_details" "flags")
+
+  if [ "$_identifier" != "$_expected_identifier" ]; then
+    die "$_label Identifier=$_identifier expected $_expected_identifier"
+  fi
+  if [ "$_team" != "$expected_team" ]; then
+    die "$_label TeamIdentifier=$_team expected $expected_team"
+  fi
+  if [ "$_authority" != "$expected_authority" ]; then
+    die "$_label Authority=$_authority expected $expected_authority"
+  fi
+
+  case $_flags in
+    *runtime*) ;;
+    *)
+      die "$_label is missing Hardened Runtime (flags=$_flags)"
+      ;;
+  esac
+
+  case $_details in
+    *Timestamp=*) ;;
+    *)
+      die "$_label is missing secure timestamp"
+      ;;
+  esac
+
+  _requirement=$(/usr/bin/codesign --display -r- "$_target" 2>&1)
+  case $_requirement in
+    *identifier\ \"$_expected_identifier\"*) ;;
+    *)
+      die "$_label designated requirement missing identifier \"$_expected_identifier\""
+      ;;
+  esac
+  case $_requirement in
+    *"$expected_team"*) ;;
+    *)
+      die "$_label designated requirement missing team $expected_team"
+      ;;
+  esac
+}
+
+# Full contract check for an installed/staged Semantouch.app.
+# Fails closed on any mismatch (version, IDs, team, universal2, HR, timestamp,
+# strict codesign, stapled ticket, Gatekeeper when notarization required).
+verify_app_bundle() {
+  _app_path=$1
+  _expected_version=$2
+  _label=${3:-app}
+
+  if [ ! -d "$_app_path" ]; then
+    die "$_label bundle not found: $_app_path"
+  fi
+
+  case $(basename -- "$_app_path") in
+    Semantouch.app) ;;
+    *)
+      die "$_label expected bundle named Semantouch.app (got: $(basename -- "$_app_path"))"
+      ;;
+  esac
+
+  _scratch=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-verify.XXXXXX")
+
+  _info_plist="$_app_path/$info_rel"
+  _host_bin="$_app_path/$host_rel"
+  _relay_bin="$_app_path/$relay_rel"
+
+  require_file "$_info_plist" "$_label Info.plist"
+  require_macho_universal2 "$_host_bin" "$_label host executable"
+  require_macho_universal2 "$_relay_bin" "$_label relay executable"
+
+  if [ "$require_codesign" -eq 1 ]; then
+    _host_inode=$(/usr/bin/stat -f '%i' "$_host_bin")
+    _relay_inode=$(/usr/bin/stat -f '%i' "$_relay_bin")
+    if [ "$_host_inode" = "$_relay_inode" ]; then
+      /bin/rm -rf "$_scratch"
+      die "$_label host and relay collapsed to one inode (case-insensitive name collision)"
+    fi
+  fi
+
+  if [ -e "$_app_path/Contents/MacOS/semantouch-macos-arm64" ] \
+    || [ -e "$_app_path/Contents/MacOS/semantouch-macos-universal2" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label contains forbidden raw helper binary"
+  fi
+
+  for _candidate in "$_app_path/Contents/MacOS"/*; do
+    [ -e "$_candidate" ] || continue
+    _leaf=$(basename -- "$_candidate")
+    case $_leaf in
+      "$expected_executable"|"$expected_relay") continue ;;
+    esac
+    if [ "$require_codesign" -eq 1 ]; then
+      _file_info=$(/usr/bin/file -b "$_candidate" 2>/dev/null || true)
+      case $_file_info in
+        *Mach-O*)
+          /bin/rm -rf "$_scratch"
+          die "$_label has unexpected nested Mach-O: $_candidate"
+          ;;
+      esac
+    fi
+  done
+
+  _bundle_id=$(/usr/bin/plutil -extract CFBundleIdentifier raw "$_info_plist")
+  _executable=$(/usr/bin/plutil -extract CFBundleExecutable raw "$_info_plist")
+  _package_type=$(/usr/bin/plutil -extract CFBundlePackageType raw "$_info_plist")
+  _min_os=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$_info_plist")
+  _short_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$_info_plist")
+  _bundle_version=$(/usr/bin/plutil -extract CFBundleVersion raw "$_info_plist")
+
+  if [ "$_bundle_id" != "$expected_bundle_id" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label CFBundleIdentifier=$_bundle_id expected $expected_bundle_id"
+  fi
+  if [ "$_executable" != "$expected_executable" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label CFBundleExecutable=$_executable expected $expected_executable"
+  fi
+  if [ "$_package_type" != "$expected_package_type" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label CFBundlePackageType=$_package_type expected $expected_package_type"
+  fi
+  if [ "$_min_os" != "$expected_min_os" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label LSMinimumSystemVersion=$_min_os expected $expected_min_os"
+  fi
+  if [ "$_short_version" != "$_bundle_version" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label CFBundleShortVersionString ($_short_version) != CFBundleVersion ($_bundle_version)"
+  fi
+  if [ "$_short_version" != "$_expected_version" ]; then
+    /bin/rm -rf "$_scratch"
+    die "$_label version $_short_version does not match plugin version $_expected_version"
+  fi
+
+  inspect_signature "$_relay_bin" "$_label relay" "$expected_relay_id" "no" "$_scratch"
+  inspect_signature "$_host_bin" "$_label host" "$expected_bundle_id" "no" "$_scratch"
+  inspect_signature "$_app_path" "$_label app" "$expected_bundle_id" "yes" "$_scratch"
+
+  if [ "$require_notarization" = "1" ]; then
+    if ! /usr/bin/xcrun stapler validate "$_app_path" >/dev/null 2>&1; then
+      /usr/bin/xcrun stapler validate "$_app_path" >&2 || true
+      /bin/rm -rf "$_scratch"
+      die "$_label is missing a valid stapled notarization ticket"
+    fi
+    if ! /usr/sbin/spctl --assess --type execute --verbose=4 "$_app_path" >/dev/null 2>&1; then
+      /usr/sbin/spctl --assess --type execute --verbose=4 "$_app_path" >&2 || true
+      /bin/rm -rf "$_scratch"
+      die "$_label failed Gatekeeper assessment"
+    fi
+    if command -v /usr/bin/syspolicy_check >/dev/null 2>&1; then
+      if ! /usr/bin/syspolicy_check distribution "$_app_path" >/dev/null 2>&1; then
+        /usr/bin/syspolicy_check distribution "$_app_path" >&2 || true
+        /bin/rm -rf "$_scratch"
+        die "$_label failed syspolicy_check distribution"
+      fi
+    fi
+  fi
+
+  /bin/rm -rf "$_scratch"
+}
+
+# Soft verify for rollback path: returns 0/1 without exiting the shell.
+try_verify_app_bundle() {
+  _app_path=$1
+  _expected_version=$2
+  _label=$3
+  if ( verify_app_bundle "$_app_path" "$_expected_version" "$_label" ); then
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# ZIP preflight + contained extraction
+# ---------------------------------------------------------------------------
+
+preflight_zip_archive() {
+  _zip_path=$1
+  _listing=$2
+
+  if [ ! -f "$_zip_path" ]; then
+    die "ZIP missing for preflight: $_zip_path"
+  fi
+
+  if ! command -v /usr/bin/zipinfo >/dev/null 2>&1; then
+    die "zipinfo is required to preflight release archives"
+  fi
+
+  if ! /usr/bin/zipinfo -1 "$_zip_path" > "$_listing"; then
+    die "failed to list ZIP members: $_zip_path"
+  fi
+
+  if [ ! -s "$_listing" ]; then
+    die "ZIP archive is empty: $_zip_path"
+  fi
+
+  _seen_names=$_listing.names
+  _seen_lower=$_listing.lower
+  : > "$_seen_names"
+  : > "$_seen_lower"
+
+  # Reject symlink members via zipinfo long listing.
+  _long_list=$_listing.long
+  if ! /usr/bin/zipinfo -l "$_zip_path" > "$_long_list"; then
+    die "failed to inspect ZIP member types: $_zip_path"
+  fi
+  if /usr/bin/awk '
+    BEGIN { in_table=0 }
+    /^---------/ { in_table=1; next }
+    !in_table { next }
+    /^[0-9]+ files?$/ { next }
+    NF == 0 { next }
+    $1 ~ /^l/ { exit 0 }
+    END { exit 1 }
+  ' "$_long_list"; then
+    die "ZIP archive contains symlink members (forbidden)"
+  fi
+
+  while IFS= read -r _member || [ -n "$_member" ]; do
+    [ -n "$_member" ] || continue
+
+    case $_member in
+      /*|~*|*:*)
+        die "ZIP member has absolute or drive path: $_member"
+        ;;
+    esac
+
+    case $_member in
+      ..|../*|*/..|*/../*)
+        die "ZIP member path escapes extraction root: $_member"
+        ;;
+    esac
+
+    # Reject backslash separators and embedded nulls/control chars via python.
+    /usr/bin/python3 - "$_member" <<'PY' || die "ZIP member path rejected"
+import sys
+member = sys.argv[1]
+if "\x00" in member or any(ord(ch) < 32 for ch in member):
+    sys.exit(1)
+if "\\" in member:
+    sys.exit(1)
+sys.exit(0)
+PY
+
+    _stripped=${_member%/}
+    case $_stripped in
+      Semantouch.app|Semantouch.app/*) ;;
+      *)
+        die "ZIP contains unexpected top-level entry: $_member"
+        ;;
+    esac
+
+    _lower=$(printf '%s\n' "$_stripped" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    if /usr/bin/grep -Fx "$_lower" "$_seen_lower" >/dev/null 2>&1; then
+      if ! /usr/bin/grep -Fx "$_stripped" "$_seen_names" >/dev/null 2>&1; then
+        die "ZIP has case-colliding paths for: $_stripped"
+      fi
+    else
+      printf '%s\n' "$_lower" >> "$_seen_lower"
+      printf '%s\n' "$_stripped" >> "$_seen_names"
+    fi
+  done < "$_listing"
+
+  if ! /usr/bin/grep -E '^(Semantouch\.app(/|$))' "$_listing" >/dev/null; then
+    die "ZIP does not contain Semantouch.app"
+  fi
+
+  _top_count=$(/usr/bin/awk -F/ '
+    {
+      top=$1
+      if (top == "") next
+      lower=tolower(top)
+      if (lower == "semantouch.app") keys[lower]=1
+    }
+    END { print length(keys)+0 }
+  ' "$_listing")
+  if [ "$_top_count" -ne 1 ]; then
+    die "ZIP must contain exactly one Semantouch.app top-level bundle"
+  fi
+}
+
+extract_zip_contained() {
+  _zip_path=$1
+  _extract_dir=$2
+
+  /bin/mkdir -p "$_extract_dir"
+  _listing=$_extract_dir/.zip-listing
+  preflight_zip_archive "$_zip_path" "$_listing"
+
+  /usr/bin/ditto -x -k "$_zip_path" "$_extract_dir"
+
+  _extract_real=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$_extract_dir")
+  while IFS= read -r _member || [ -n "$_member" ]; do
+    [ -n "$_member" ] || continue
+    _stripped=${_member%/}
+    _target="$_extract_dir/$_stripped"
+    if [ ! -e "$_target" ] && [ ! -L "$_target" ]; then
+      continue
+    fi
+    if [ -L "$_target" ]; then
+      die "extracted symlink is forbidden: $_stripped"
+    fi
+    _real=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$_target")
+    case $_real in
+      "$_extract_real"|"$_extract_real"/*) ;;
+      *)
+        die "extracted path escapes containment: $_stripped -> $_real"
+        ;;
+    esac
+  done < "$_listing"
+
+  _app_count=0
+  _found_app=""
+  for _candidate in "$_extract_dir"/*; do
+    [ -e "$_candidate" ] || continue
+    _base=$(basename -- "$_candidate")
+    case $_base in
+      .zip-listing|.zip-listing.*) continue ;;
+    esac
+    if [ "$_base" = "$app_name" ]; then
+      if [ ! -d "$_candidate" ]; then
+        die "Semantouch.app is not a directory after extraction"
+      fi
+      _app_count=$((_app_count + 1))
+      _found_app=$_candidate
+    else
+      die "app archive contains unexpected entry after extraction: $_base"
+    fi
+  done
+  if [ "$_app_count" -ne 1 ] || [ -z "$_found_app" ]; then
+    die "app archive must contain exactly one $app_name"
+  fi
+
+  _app_real=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$_found_app")
+  case $_app_real in
+    "$_extract_real"/*) ;;
+    *)
+      die "extracted app is outside extract directory"
+      ;;
+  esac
+
+  printf '%s\n' "$_found_app"
+}
+
+# ---------------------------------------------------------------------------
+# Serialized install with atomic same-volume cutover + rollback
+# ---------------------------------------------------------------------------
+
+cleanup_all() {
+  if [ -n "${INSTALL_LOCK_DIR:-}" ] && [ -d "$INSTALL_LOCK_DIR" ]; then
+    /bin/rm -rf "$INSTALL_LOCK_DIR"
+    INSTALL_LOCK_DIR=""
+  fi
+  if [ -n "${temp_dir:-}" ] && [ -d "$temp_dir" ]; then
+    /bin/rm -rf "$temp_dir"
+    temp_dir=""
+  fi
+}
+
+acquire_install_lock() {
+  _lock_root="${SEMANTOUCH_LOCK_DIR:-$HOME/Library/Caches/semantouch}"
+  /bin/mkdir -p "$_lock_root"
+  _lock_dir="$_lock_root/install.lock"
+  _attempts=0
+  _max_attempts=${SEMANTOUCH_LOCK_ATTEMPTS:-600}
+  while ! /bin/mkdir "$_lock_dir" 2>/dev/null; do
+    _attempts=$((_attempts + 1))
+    if [ "$_attempts" -ge "$_max_attempts" ]; then
+      die "timed out acquiring install lock at $_lock_dir"
+    fi
+    if [ -d "$_lock_dir" ]; then
+      _lock_age=$(/usr/bin/python3 -c 'import os,sys,time; p=sys.argv[1]; print(int(time.time()-os.stat(p).st_mtime))' "$_lock_dir" 2>/dev/null || printf '0')
+      if [ "$_lock_age" -gt 1800 ]; then
+        warn "removing stale install lock (age ${_lock_age}s)"
+        /bin/rm -rf "$_lock_dir"
+        continue
+      fi
+    fi
+    /bin/sleep 0.1
+  done
+  printf '%s\n' "$$" > "$_lock_dir/pid"
+  INSTALL_LOCK_DIR=$_lock_dir
+}
+
+release_install_lock() {
+  if [ -n "${INSTALL_LOCK_DIR:-}" ] && [ -d "$INSTALL_LOCK_DIR" ]; then
+    /bin/rm -rf "$INSTALL_LOCK_DIR"
+    INSTALL_LOCK_DIR=""
+  fi
+}
+
+install_app_atomic() {
+  _source_app=$1
+  _dest_app=$2
+
+  _dest_dir=$(dirname -- "$_dest_app")
+  /bin/mkdir -p "$_dest_dir"
+
+  _incoming="$_dest_dir/.Semantouch.app.incoming.$$"
+  _backup="$_dest_dir/.Semantouch.app.backup.$$"
+  /bin/rm -rf "$_incoming" "$_backup"
+
+  /usr/bin/ditto "$_source_app" "$_incoming"
+
+  # Verify staged copy before touching the live destination.
+  verify_app_bundle "$_incoming" "$version" "staged"
+
+  _had_previous=0
+  if [ -e "$_dest_app" ]; then
+    _had_previous=1
+    /bin/mv -f "$_dest_app" "$_backup"
+  fi
+
+  if ! /bin/mv -f "$_incoming" "$_dest_app"; then
+    if [ "$_had_previous" -eq 1 ] && [ -e "$_backup" ]; then
+      /bin/mv -f "$_backup" "$_dest_app" || true
+    fi
+    /bin/rm -rf "$_incoming"
+    die "failed to install $_dest_app"
+  fi
+
+  # Post-install verification with backup retained for rollback.
+  if ! try_verify_app_bundle "$_dest_app" "$version" "installed"; then
+    /bin/rm -rf "$_dest_app"
+    if [ "$_had_previous" -eq 1 ] && [ -e "$_backup" ]; then
+      /bin/mv -f "$_backup" "$_dest_app" || true
+    fi
+    die "post-install verification failed for $_dest_app; rolled back"
+  fi
+
+  /bin/rm -rf "$_backup"
+}
+
+# ---------------------------------------------------------------------------
+# Resolve / bootstrap
+# ---------------------------------------------------------------------------
+
+resolve_verified_relay() {
+  _app_path=$1
+  _label=$2
+
+  if [ ! -d "$_app_path" ]; then
+    return 1
+  fi
+
+  # Fail closed: any present canonical install must verify before exec.
+  verify_app_bundle "$_app_path" "$version" "$_label"
+  _relay_path="$_app_path/$relay_rel"
+  if [ ! -x "$_relay_path" ]; then
+    die "$_label is missing executable relay at $_relay_path"
+  fi
+  printf '%s\n' "$_relay_path"
+}
+
+system_present=0
+user_present=0
+if [ -d "$system_app" ]; then
+  system_present=1
+fi
+if [ -d "$user_app" ]; then
+  user_present=1
 fi
 
-exec "$binary" "$@"
+if [ "$system_present" -eq 1 ] && [ "$user_present" -eq 1 ]; then
+  warn "both $system_app and $user_app are installed; preferring $system_app after verification"
+fi
+
+if [ "$system_present" -eq 1 ]; then
+  # Fail closed on mismatched system install — do not fall through to user/bootstrap.
+  _relay=$(resolve_verified_relay "$system_app" "system")
+  exec "$_relay" "$@"
+fi
+
+if [ "$user_present" -eq 1 ]; then
+  # Fail closed on mismatched user install — do not silently replace.
+  _relay=$(resolve_verified_relay "$user_app" "user")
+  exec "$_relay" "$@"
+fi
+
+# Neither canonical install is present — bootstrap the signed app ZIP into the
+# user Applications path (never /Applications without an existing install).
+asset="Semantouch-v${version}-macos-universal2.zip"
+checksum_asset="${asset}.sha256"
+base_url="${SEMANTOUCH_RELEASE_BASE_URL:-https://github.com/watzon/semantouch/releases/download/v$version}"
+
+trap cleanup_all EXIT HUP INT TERM
+acquire_install_lock
+
+# Re-check after lock: another process may have installed while we waited.
+if [ -d "$user_app" ]; then
+  release_install_lock
+  trap - EXIT HUP INT TERM
+  _relay=$(resolve_verified_relay "$user_app" "user")
+  exec "$_relay" "$@"
+fi
+if [ -d "$system_app" ]; then
+  release_install_lock
+  trap - EXIT HUP INT TERM
+  _relay=$(resolve_verified_relay "$system_app" "system")
+  exec "$_relay" "$@"
+fi
+
+temp_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-app.XXXXXX")
+
+printf '%s\n' "semantouch: downloading Semantouch.app v$version for macOS universal2" >&2
+/usr/bin/curl --fail --location --silent --show-error \
+  "$base_url/$asset" --output "$temp_dir/$asset"
+/usr/bin/curl --fail --location --silent --show-error \
+  "$base_url/$checksum_asset" --output "$temp_dir/$checksum_asset"
+
+# Exact one-line sidecar: lowercase-64-hex + two spaces + exact basename.
+sidecar_line=$(/usr/bin/head -n 1 "$temp_dir/$checksum_asset" | /usr/bin/tr -d '\r')
+expected=$(printf '%s\n' "$sidecar_line" | /usr/bin/awk '{ print $1 }')
+sidecar_name=$(printf '%s\n' "$sidecar_line" | /usr/bin/awk '{ print $2 }')
+if [ -z "$expected" ] || [ "${#expected}" -ne 64 ]; then
+  die "checksum sidecar is not a 64-char hex digest"
+fi
+case $expected in
+  *[!0-9a-f]*)
+    die "checksum sidecar digest must be lowercase hex"
+    ;;
+esac
+_non_empty=$(/usr/bin/awk 'NF { c++ } END { print c+0 }' "$temp_dir/$checksum_asset")
+if [ "$_non_empty" -ne 1 ]; then
+  die "checksum sidecar must contain exactly one digest line"
+fi
+if [ -n "$sidecar_name" ] && [ "$sidecar_name" != "$asset" ]; then
+  die "checksum sidecar names $sidecar_name but asset is $asset"
+fi
+if [ -n "$sidecar_name" ]; then
+  expected_line="$expected  $asset"
+  if [ "$sidecar_line" != "$expected_line" ]; then
+    die "checksum sidecar must be '<64 lowercase hex><two spaces>$asset'"
+  fi
+fi
+
+actual=$(/usr/bin/shasum -a 256 "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')
+if [ "$actual" != "$expected" ]; then
+  die "checksum verification failed for $asset"
+fi
+
+extract_dir="$temp_dir/extract"
+found_app=$(extract_zip_contained "$temp_dir/$asset" "$extract_dir")
+
+if [ ! -x "$found_app/$relay_rel" ]; then
+  die "downloaded app is missing nested relay at $relay_rel"
+fi
+if [ ! -x "$found_app/$host_rel" ]; then
+  die "downloaded app is missing host executable SemantouchHost"
+fi
+
+verify_app_bundle "$found_app" "$version" "downloaded"
+install_app_atomic "$found_app" "$user_app"
+
+/bin/rm -rf "$temp_dir"
+temp_dir=""
+release_install_lock
+trap - EXIT HUP INT TERM
+
+if [ ! -x "$user_relay" ]; then
+  die "installed app is missing executable relay at $user_relay"
+fi
+
+verify_app_bundle "$user_app" "$version" "user"
+exec "$user_relay" "$@"

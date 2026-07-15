@@ -1,0 +1,292 @@
+#!/bin/sh
+# Deterministic verification of a signed Semantouch.app release layout.
+# Never signs, and never passes --deep to codesign for signing purposes.
+# Verification may use codesign --verify --deep --strict.
+#
+# Layout (case-insensitive volume safe):
+#   Semantouch.app/Contents/MacOS/SemantouchHost  (app host / CFBundleExecutable)
+#   Semantouch.app/Contents/MacOS/semantouch      (public stdio relay path)
+#
+# Every nested Mach-O must be universal2 (exactly arm64 + x86_64).
+# Optional second arg: expected version.
+# Optional env:
+#   SEMANTOUCH_REQUIRE_NOTARIZATION=1  require stapled notarization + Gatekeeper assessment
+set -eu
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  printf '%s\n' "usage: $0 /path/to/Semantouch.app [expected-version]" >&2
+  exit 2
+fi
+
+app_path=$1
+expected_version=${2:-}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+expected_bundle_id="tech.watzon.semantouch"
+expected_relay_id="tech.watzon.semantouch.cli"
+expected_team="MB5789APU7"
+expected_authority="Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
+expected_executable="SemantouchHost"
+expected_relay="semantouch"
+expected_min_os="14.0"
+expected_package_type="APPL"
+expected_archs="arm64 x86_64"
+require_notarization=${SEMANTOUCH_REQUIRE_NOTARIZATION:-0}
+
+die() {
+  printf '%s\n' "verify-app-release: $*" >&2
+  exit 1
+}
+
+require_file() {
+  path=$1
+  label=$2
+  if [ ! -e "$path" ]; then
+    die "$label missing: $path"
+  fi
+}
+
+require_macho_universal2() {
+  path=$1
+  label=$2
+
+  require_file "$path" "$label"
+  if [ ! -x "$path" ]; then
+    die "$label is not executable: $path"
+  fi
+
+  file_info=$(/usr/bin/file -b "$path" 2>/dev/null || true)
+  case $file_info in
+    *Mach-O*) ;;
+    *)
+      die "$label is not a Mach-O executable: $path ($file_info)"
+      ;;
+  esac
+
+  archs=$(/usr/bin/lipo -archs "$path" 2>/dev/null || true)
+  if [ -z "$archs" ]; then
+    die "could not read architecture for $label: $path"
+  fi
+
+  normalized=$(printf '%s' "$archs" | /usr/bin/tr -s '[:space:]' ' ' | /usr/bin/sed 's/^ //;s/ $//')
+  has_arm64=0
+  has_x86_64=0
+  for arch in $normalized; do
+    case $arch in
+      arm64) has_arm64=1 ;;
+      x86_64) has_x86_64=1 ;;
+      *)
+        die "$label has unexpected architecture slice: $arch ($path; archs=$normalized)"
+        ;;
+    esac
+  done
+
+  if [ "$has_arm64" -ne 1 ] || [ "$has_x86_64" -ne 1 ]; then
+    die "$label must be universal2 ($expected_archs), got: $normalized ($path)"
+  fi
+
+  slice_count=$(printf '%s\n' $normalized | /usr/bin/wc -w | /usr/bin/tr -d ' ')
+  if [ "$slice_count" -ne 2 ]; then
+    die "$label must contain exactly two architecture slices, got: $normalized ($path)"
+  fi
+}
+
+codesign_field() {
+  details=$1
+  field=$2
+  printf '%s\n' "$details" | /usr/bin/awk -F= -v key="$field" '
+    index($0, key "=") == 1 {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  '
+}
+
+# codesign --display on a nested path inside an app bundle can resolve to the
+# outer bundle. Copy nested Mach-Os to a temporary location before inspecting
+# their independent signature metadata.
+inspect_signature() {
+  path=$1
+  label=$2
+  expected_identifier=$3
+  treat_as_bundle=$4
+
+  if [ "$treat_as_bundle" = "yes" ]; then
+    target=$path
+  else
+    temp_copy=$tmpdir/$(basename -- "$path").$$
+    /bin/cp "$path" "$temp_copy"
+    /bin/chmod u+w "$temp_copy"
+    target=$temp_copy
+  fi
+
+  if [ "$treat_as_bundle" = "yes" ]; then
+    if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$target" >/dev/null 2>&1; then
+      /usr/bin/codesign --verify --deep --strict --verbose=4 "$target" >&2 || true
+      die "$label failed codesign verification: $path"
+    fi
+  else
+    if ! /usr/bin/codesign --verify --strict --verbose=2 "$target" >/dev/null 2>&1; then
+      /usr/bin/codesign --verify --strict --verbose=4 "$target" >&2 || true
+      die "$label failed codesign verification: $path"
+    fi
+  fi
+
+  details=$(/usr/bin/codesign --display --verbose=4 "$target" 2>&1)
+  identifier=$(codesign_field "$details" "Identifier")
+  team=$(codesign_field "$details" "TeamIdentifier")
+  authority=$(codesign_field "$details" "Authority")
+  flags=$(codesign_field "$details" "flags")
+
+  if [ "$identifier" != "$expected_identifier" ]; then
+    die "$label Identifier=$identifier expected $expected_identifier"
+  fi
+  if [ "$team" != "$expected_team" ]; then
+    die "$label TeamIdentifier=$team expected $expected_team"
+  fi
+  if [ "$authority" != "$expected_authority" ]; then
+    die "$label Authority=$authority expected $expected_authority"
+  fi
+
+  case $flags in
+    *runtime*) ;;
+    *)
+      die "$label is missing Hardened Runtime (flags=$flags)"
+      ;;
+  esac
+
+  case $details in
+    *Timestamp=*) ;;
+    *)
+      die "$label is missing secure timestamp"
+      ;;
+  esac
+
+  requirement=$(/usr/bin/codesign --display -r- "$target" 2>&1)
+  case $requirement in
+    *identifier\ \"$expected_identifier\"*) ;;
+    *)
+      die "$label designated requirement missing identifier \"$expected_identifier\": $requirement"
+      ;;
+  esac
+  case $requirement in
+    *"$expected_team"*) ;;
+    *)
+      die "$label designated requirement missing team $expected_team: $requirement"
+      ;;
+  esac
+}
+
+tmpdir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-verify.XXXXXX")
+trap '/bin/rm -rf "$tmpdir"' EXIT HUP INT TERM
+
+if [ ! -d "$app_path" ]; then
+  die "app bundle not found: $app_path"
+fi
+
+case $(basename -- "$app_path") in
+  Semantouch.app) ;;
+  *)
+    die "expected bundle named Semantouch.app (got: $(basename -- "$app_path"))"
+    ;;
+esac
+
+info_plist="$app_path/Contents/Info.plist"
+host_bin="$app_path/Contents/MacOS/$expected_executable"
+relay_bin="$app_path/Contents/MacOS/$expected_relay"
+
+require_file "$info_plist" "Info.plist"
+require_macho_universal2 "$host_bin" "host executable"
+require_macho_universal2 "$relay_bin" "relay executable"
+
+host_inode=$(/usr/bin/stat -f '%i' "$host_bin")
+relay_inode=$(/usr/bin/stat -f '%i' "$relay_bin")
+if [ "$host_inode" = "$relay_inode" ]; then
+  die "host and relay collapsed to one inode (case-insensitive name collision)"
+fi
+
+if [ -e "$app_path/Contents/MacOS/semantouch-macos-arm64" ] \
+  || [ -e "$app_path/Contents/MacOS/semantouch-macos-universal2" ]; then
+  die "raw helper binary must not be nested inside the app bundle"
+fi
+
+# Refuse any other nested Mach-O that is not the known host/relay pair.
+for candidate in "$app_path/Contents/MacOS"/*; do
+  [ -e "$candidate" ] || continue
+  leaf=$(basename -- "$candidate")
+  case $leaf in
+    "$expected_executable"|"$expected_relay") continue ;;
+  esac
+  file_info=$(/usr/bin/file -b "$candidate" 2>/dev/null || true)
+  case $file_info in
+    *Mach-O*)
+      die "unexpected nested Mach-O inside app bundle: $candidate"
+      ;;
+  esac
+done
+
+bundle_id=$(/usr/bin/plutil -extract CFBundleIdentifier raw "$info_plist")
+executable=$(/usr/bin/plutil -extract CFBundleExecutable raw "$info_plist")
+package_type=$(/usr/bin/plutil -extract CFBundlePackageType raw "$info_plist")
+min_os=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$info_plist")
+short_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$info_plist")
+bundle_version=$(/usr/bin/plutil -extract CFBundleVersion raw "$info_plist")
+
+if [ "$bundle_id" != "$expected_bundle_id" ]; then
+  die "CFBundleIdentifier=$bundle_id expected $expected_bundle_id"
+fi
+if [ "$executable" != "$expected_executable" ]; then
+  die "CFBundleExecutable=$executable expected $expected_executable"
+fi
+if [ "$package_type" != "$expected_package_type" ]; then
+  die "CFBundlePackageType=$package_type expected $expected_package_type"
+fi
+if [ "$min_os" != "$expected_min_os" ]; then
+  die "LSMinimumSystemVersion=$min_os expected $expected_min_os"
+fi
+if [ "$short_version" != "$bundle_version" ]; then
+  die "CFBundleShortVersionString ($short_version) != CFBundleVersion ($bundle_version)"
+fi
+
+if [ -z "$expected_version" ]; then
+  expected_version=$(/usr/bin/plutil -extract version raw "$project_root/package.json")
+fi
+if [ "$short_version" != "$expected_version" ]; then
+  die "app version $short_version does not match expected $expected_version"
+fi
+
+# Verify nested Mach-Os from temp copies so display does not collapse to the
+# outer bundle, then verify the app bundle itself.
+inspect_signature "$relay_bin" "relay" "$expected_relay_id" "no"
+inspect_signature "$host_bin" "host" "$expected_bundle_id" "no"
+inspect_signature "$app_path" "app" "$expected_bundle_id" "yes"
+
+# Quarantine must not be present on a freshly assembled/signed CI artifact.
+if /usr/bin/xattr -p com.apple.quarantine "$app_path" >/dev/null 2>&1; then
+  die "app bundle unexpectedly carries com.apple.quarantine"
+fi
+
+if [ "$require_notarization" = "1" ]; then
+  if ! /usr/bin/xcrun stapler validate "$app_path" >/dev/null 2>&1; then
+    /usr/bin/xcrun stapler validate "$app_path" >&2 || true
+    die "app bundle is missing a valid stapled notarization ticket"
+  fi
+
+  # spctl assesses Gatekeeper policy for Developer ID apps.
+  if ! /usr/sbin/spctl --assess --type execute --verbose=4 "$app_path" >/dev/null 2>&1; then
+    /usr/sbin/spctl --assess --type execute --verbose=4 "$app_path" >&2 || true
+    die "Gatekeeper assessment failed for $app_path"
+  fi
+
+  if command -v /usr/bin/syspolicy_check >/dev/null 2>&1; then
+    if ! /usr/bin/syspolicy_check distribution "$app_path" >/dev/null 2>&1; then
+      /usr/bin/syspolicy_check distribution "$app_path" >&2 || true
+      die "syspolicy_check distribution failed for $app_path"
+    fi
+  fi
+fi
+
+printf '%s\n' "verify-app-release: $app_path ok (v$short_version, team $expected_team, universal2 host=$expected_executable relay=$expected_relay)"

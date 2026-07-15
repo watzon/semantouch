@@ -4,23 +4,32 @@ import ComputerUseCore
 
 /// Lifecycle goldens for the controller over a fake presenter. No AppKit.
 /// The overlay APPEARS on the first pointer-kind action, PERSISTS (idle but
-/// visible) between actions and through interruption, and HIDES only on explicit teardown.
+/// visible) between actions and through interruption, HIDES after 30 s of true
+/// idle via an injectable cleanup scheduler, and HIDES immediately on explicit teardown.
 final class CursorControllerTests: XCTestCase {
 
     private func makeController(
         presenter: FakeCursorPresenter,
-        preference: CursorPreference = .on
-    ) -> (CursorController, CursorAnimator) {
+        preference: CursorPreference = .on,
+        idleCleanupScheduler: CursorIdleCleanupScheduling = FakeIdleCleanupScheduler(),
+        idleCleanupTimeout: TimeInterval = CursorController.defaultIdleCleanupTimeout
+    ) -> (CursorController, CursorAnimator, FakeIdleCleanupScheduler?) {
         let animator = CursorAnimator()
-        let controller = CursorController(presenter: presenter, animator: animator, preference: preference)
-        return (controller, animator)
+        let controller = CursorController(
+            presenter: presenter,
+            animator: animator,
+            preference: preference,
+            idleCleanupScheduler: idleCleanupScheduler,
+            idleCleanupTimeout: idleCleanupTimeout
+        )
+        return (controller, animator, idleCleanupScheduler as? FakeIdleCleanupScheduler)
     }
 
     // MARK: First-show arming (pointer-kind vs keyboard-only)
 
     func testFirstPointerActionShows() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 50, y: 60), pointerKind: true)
 
@@ -33,7 +42,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testKeyboardOnlyActionDoesNotShow() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // A keyboard-only (non-pointer) action before any pointer action reflects nothing.
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .progress, pointerKind: false)
@@ -43,7 +52,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testKeyboardThenPointerShowsOnThePointerAction() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // A preceding keyboard action does NOT show...
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .progress, pointerKind: false)
@@ -57,7 +66,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testKeyboardActionReflectsOnceActivated() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // Activate with a pointer action, then a keyboard action updates (no re-show).
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 10, y: 10), pointerKind: true)
@@ -70,7 +79,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testLocationlessActionKeepsLastPointOnActiveSession() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // An independent pointer stays where it last acted: a location-less action
         // (keyboard progress, an unresolvable semantic frame) on an already-visible
@@ -92,7 +101,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testShowUsesDeterministicIdentityColor() {
         let presenter = FakeCursorPresenter()
-        let (controller, animator) = makeController(presenter: presenter)
+        let (controller, animator, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s9", windowFrame: .fixtureWindow, action: .move, pointerKind: true)
 
@@ -103,7 +112,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testSecondReflectSameSessionDoesNotReshow() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .move, at: Point(x: 10, y: 10), pointerKind: true)
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 20, y: 20), pointerKind: true)
@@ -115,7 +124,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testSwitchingSessionsReshows() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .move, pointerKind: true)
         controller.reflect(sessionId: "s2", windowFrame: .fixtureWindow, action: .move, pointerKind: true)
@@ -128,7 +137,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testFinishCompletedDropsToIdleWithoutHiding() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 40, y: 40), pointerKind: true)
         controller.finish(sessionId: "s1", interrupted: false)
@@ -141,7 +150,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testFinishInterruptedStaysVisible() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 15, y: 25), pointerKind: true)
         controller.finish(sessionId: "s1", interrupted: true)
@@ -158,7 +167,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testOverlayStaysVisibleAcrossManySequentialActions() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // A pointer action shows the overlay, then N reflect/finish cycles (pointer AND
         // keyboard) never hide between actions.
@@ -178,7 +187,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testFinishForInactiveSessionDoesNothing() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         let before = presenter.calls.count
@@ -190,7 +199,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testEndSessionHidesActiveOverlay() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         controller.endSession(sessionId: "s1")
@@ -199,7 +208,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testEndSessionDisarmsFirstShow() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // Activate + tear down; a subsequent keyboard-only action must NOT re-show (the
         // session's first-show arming was cleared by endSession).
@@ -211,7 +220,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testEndSessionForInactiveSessionIsNoop() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         let before = presenter.calls.count
@@ -221,7 +230,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testShutdownHidesAndDisarmsAllSessions() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         controller.shutdown()
@@ -235,11 +244,84 @@ final class CursorControllerTests: XCTestCase {
         XCTAssertEqual(presenter.showCount, 2)
     }
 
+    // MARK: Turn end (notifications/turn-ended) — decorative only
+
+    /// `endTurn` hides an active cursor and disarms first-show, but does NOT clear stored
+    /// window geometry or end app sessions (geometry still usable for a later re-show).
+    func testEndTurnHidesAndDisarmsPreservingWindowGeometry() {
+        let presenter = FakeCursorPresenter()
+        let (controller, _, _) = makeController(presenter: presenter)
+
+        controller.reflect(
+            sessionId: "s1",
+            windowFrame: .fixtureWindow,
+            action: .press,
+            at: Point(x: 30, y: 40),
+            pointerKind: true
+        )
+        XCTAssertEqual(presenter.showCount, 1)
+        XCTAssertEqual(presenter.hideCount, 0)
+
+        controller.endTurn()
+        XCTAssertEqual(presenter.hideCount, 1)
+
+        // First-show is disarmed: a keyboard-only action must NOT re-show.
+        controller.reflect(
+            sessionId: "s1",
+            windowFrame: .fixtureWindow,
+            action: .progress,
+            pointerKind: false
+        )
+        XCTAssertEqual(presenter.showCount, 1)
+
+        // A later pointer action re-shows. Stored geometry was preserved by endTurn, so a
+        // noteWindowFrame follow after re-show still works (session lifecycle intact).
+        controller.reflect(
+            sessionId: "s1",
+            windowFrame: .fixtureWindow,
+            action: .press,
+            at: Point(x: 10, y: 10),
+            pointerKind: true
+        )
+        XCTAssertEqual(presenter.showCount, 2)
+        controller.noteWindowFrame(sessionId: "s1", .fixtureWindowMoved)
+        XCTAssertEqual(presenter.lastUpdate?.panelFrame, .fixtureWindowMoved)
+        XCTAssertEqual(presenter.lastUpdate?.cursorInPanel, Point(x: 10, y: 10))
+    }
+
+    func testEndTurnIsInertWhenDisabled() {
+        let presenter = FakeCursorPresenter()
+        let (controller, _, _) = makeController(presenter: presenter, preference: .off)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.endTurn()
+        XCTAssertEqual(presenter.calls.count, 0)
+    }
+
+    func testEndTurnIsInertWhenHeadless() {
+        let presenter = FakeCursorPresenter(canPresent: false)
+        let (controller, _, _) = makeController(presenter: presenter, preference: .on)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.endTurn()
+        XCTAssertEqual(presenter.calls.count, 0)
+    }
+
+    func testEndTurnWithNoActiveOverlayIsSafe() {
+        let presenter = FakeCursorPresenter()
+        let (controller, _, _) = makeController(presenter: presenter)
+
+        // Geometry recorded but never shown — endTurn must not call the presenter.
+        controller.noteWindowFrame(sessionId: "s1", .fixtureWindow)
+        controller.endTurn()
+        XCTAssertEqual(presenter.calls.count, 0)
+    }
+
     // MARK: Window-move follow
 
     func testNoteWindowFrameFollowsMoveForActiveSession() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 30, y: 30), pointerKind: true)
         controller.noteWindowFrame(sessionId: "s1", .fixtureWindowMoved)
@@ -252,7 +334,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testNoteWindowFrameBeforeAnyReflectDoesNotPresent() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         // get_app_state records geometry but must never bring the overlay on screen.
         controller.noteWindowFrame(sessionId: "s1", .fixtureWindow)
@@ -261,7 +343,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testNoteWindowFrameForInactiveSessionDoesNotMoveOverlay() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         let before = presenter.calls.count
@@ -273,7 +355,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testPreferenceOffIsFullyInert() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter, preference: .off)
+        let (controller, _, _) = makeController(presenter: presenter, preference: .off)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         controller.finish(sessionId: "s1", interrupted: true)
@@ -286,7 +368,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testPreferenceDimUsesTranslucentAlpha() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter, preference: .dim)
+        let (controller, _, _) = makeController(presenter: presenter, preference: .dim)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         XCTAssertEqual(presenter.shownColors.first?.alpha, 0.5)
@@ -295,7 +377,7 @@ final class CursorControllerTests: XCTestCase {
     func testHeadlessPresenterNeverPresents() {
         // GUI unavailable (headless/mcp): even preference `on` must create nothing.
         let presenter = FakeCursorPresenter(canPresent: false)
-        let (controller, _) = makeController(presenter: presenter, preference: .on)
+        let (controller, _, _) = makeController(presenter: presenter, preference: .on)
 
         controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
         controller.finish(sessionId: "s1", interrupted: true)
@@ -307,7 +389,7 @@ final class CursorControllerTests: XCTestCase {
 
     func testDegenerateWindowHidesRatherThanPresenting() {
         let presenter = FakeCursorPresenter()
-        let (controller, _) = makeController(presenter: presenter)
+        let (controller, _, _) = makeController(presenter: presenter)
 
         controller.reflect(sessionId: "s1", windowFrame: Rect(x: 0, y: 0, width: 0, height: 0), action: .press, pointerKind: true)
         XCTAssertEqual(presenter.updateCount, 0)
@@ -332,5 +414,253 @@ final class CursorControllerTests: XCTestCase {
         controller.endSession(sessionId: "s1")
         controller.shutdown()
         controller.synchronize()
+    }
+
+    // MARK: Idle cleanup (injectable scheduler; no wall clock)
+
+    func testFinishSchedulesDefaultThirtySecondIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, fake) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+        XCTAssertTrue(fake === scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 12, y: 18), pointerKind: true)
+        XCTAssertEqual(scheduler.liveCount, 0)
+
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.lastUpdate?.visualState, .idle)
+        XCTAssertEqual(scheduler.liveCount, 1)
+        XCTAssertEqual(scheduler.lastDelay, CursorController.defaultIdleCleanupTimeout)
+        XCTAssertEqual(scheduler.lastDelay, 30)
+    }
+
+    func testIdleCleanupHidesAfterTimeoutWhenStillIdle() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 5, y: 5), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(presenter.hideCount, 0)
+
+        XCTAssertTrue(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+        XCTAssertEqual(scheduler.liveCount, 0)
+    }
+
+    func testReflectAfterFinishCancelsIdleCleanupAndPersistsPosition() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 40, y: 50), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.liveCount, 1)
+
+        // Next tool call cancels the idle timer and keeps the same overlay identity.
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .move, at: Point(x: 70, y: 80), pointerKind: true)
+        XCTAssertEqual(scheduler.liveCount, 0)
+        XCTAssertEqual(presenter.showCount, 1)
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.lastUpdate?.cursorInPanel, Point(x: 70, y: 80))
+
+        // A stale fire of the cancelled token must not hide.
+        XCTAssertFalse(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 0)
+    }
+
+    func testSuccessiveFinishReschedulesIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 1, y: 1), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 1)
+        XCTAssertEqual(scheduler.liveCount, 1)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 2, y: 2), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 2)
+        XCTAssertEqual(scheduler.liveCount, 1)
+        XCTAssertEqual(scheduler.lastDelay, 30)
+
+        // Only the latest schedule is live; firing once hides, a second fire is empty.
+        XCTAssertTrue(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+        XCTAssertFalse(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testNoteWindowFrameWhileIdleReschedulesCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 20, y: 20), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 1)
+
+        controller.noteWindowFrame(sessionId: "s1", .fixtureWindowMoved)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 2)
+        XCTAssertEqual(scheduler.liveCount, 1)
+        XCTAssertEqual(presenter.lastUpdate?.panelFrame, .fixtureWindowMoved)
+        XCTAssertEqual(presenter.lastUpdate?.cursorInPanel, Point(x: 20, y: 20))
+        XCTAssertEqual(presenter.lastUpdate?.visualState, .idle)
+        XCTAssertEqual(presenter.hideCount, 0)
+
+        XCTAssertTrue(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testStaleIdleCleanupDoesNotHideAfterReflect() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 9, y: 9), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        let firstGenerationPending = scheduler.pending
+        XCTAssertEqual(firstGenerationPending.count, 1)
+
+        // Capture and later force-fire the original work even after cancellation, proving
+        // generation isolation (not only token cancel) protects the active overlay.
+        let staleWork = firstGenerationPending[0].work
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .move, at: Point(x: 11, y: 11), pointerKind: true)
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.showCount, 1)
+
+        staleWork()
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.lastUpdate?.cursorInPanel, Point(x: 11, y: 11))
+    }
+
+    func testSessionSwitchInvalidatesPreviousIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 3, y: 3), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        let s1Work = scheduler.pending[0].work
+
+        // Switch owner: s2 acquires the overlay. Old s1 cleanup must not hide s2.
+        controller.reflect(sessionId: "s2", windowFrame: .fixtureWindow, action: .press, at: Point(x: 4, y: 4), pointerKind: true)
+        XCTAssertEqual(presenter.showCount, 2)
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(scheduler.liveCount, 0)
+
+        s1Work()
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.lastUpdate?.cursorInPanel, Point(x: 4, y: 4))
+
+        controller.finish(sessionId: "s2", interrupted: false)
+        XCTAssertEqual(scheduler.liveCount, 1)
+        XCTAssertTrue(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testEndSessionCancelsPendingIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.liveCount, 1)
+
+        controller.endSession(sessionId: "s1")
+        XCTAssertEqual(presenter.hideCount, 1)
+        XCTAssertEqual(scheduler.liveCount, 0)
+
+        // Stale fire after explicit teardown is harmless.
+        XCTAssertFalse(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testEndTurnCancelsPendingIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.liveCount, 1)
+
+        controller.endTurn()
+        XCTAssertEqual(presenter.hideCount, 1)
+        XCTAssertEqual(scheduler.liveCount, 0)
+        XCTAssertFalse(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testShutdownCancelsPendingIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        XCTAssertEqual(scheduler.liveCount, 1)
+
+        controller.shutdown()
+        XCTAssertEqual(presenter.hideCount, 1)
+        XCTAssertEqual(scheduler.liveCount, 0)
+        XCTAssertFalse(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
+    }
+
+    func testDisabledNeverSchedulesIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(
+            presenter: presenter,
+            preference: .off,
+            idleCleanupScheduler: scheduler
+        )
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        controller.noteWindowFrame(sessionId: "s1", .fixtureWindowMoved)
+        controller.endTurn()
+        controller.shutdown()
+
+        XCTAssertEqual(presenter.calls.count, 0)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 0)
+        XCTAssertEqual(scheduler.liveCount, 0)
+    }
+
+    func testHeadlessNeverSchedulesIdleCleanup() {
+        let presenter = FakeCursorPresenter(canPresent: false)
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(
+            presenter: presenter,
+            preference: .on,
+            idleCleanupScheduler: scheduler
+        )
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: false)
+        controller.endSession(sessionId: "s1")
+
+        XCTAssertEqual(presenter.calls.count, 0)
+        XCTAssertEqual(scheduler.scheduledDelays.count, 0)
+    }
+
+    func testInterruptedFinishAlsoArmsIdleCleanup() {
+        let presenter = FakeCursorPresenter()
+        let scheduler = FakeIdleCleanupScheduler()
+        let (controller, _, _) = makeController(presenter: presenter, idleCleanupScheduler: scheduler)
+
+        controller.reflect(sessionId: "s1", windowFrame: .fixtureWindow, action: .press, at: Point(x: 8, y: 8), pointerKind: true)
+        controller.finish(sessionId: "s1", interrupted: true)
+        XCTAssertEqual(presenter.hideCount, 0)
+        XCTAssertEqual(presenter.lastUpdate?.visualState, .idle)
+        XCTAssertEqual(scheduler.liveCount, 1)
+        XCTAssertEqual(scheduler.lastDelay, 30)
+
+        XCTAssertTrue(scheduler.fireNext())
+        XCTAssertEqual(presenter.hideCount, 1)
     }
 }

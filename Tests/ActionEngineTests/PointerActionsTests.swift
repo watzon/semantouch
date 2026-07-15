@@ -20,6 +20,57 @@ final class PointerActionsTests: XCTestCase {
         ])
     }
 
+    func testDoubleClickEmitsTwoDownUpPairs() {
+        let synth = FakeSynthesizer()
+        PointerActions.click(
+            atGlobal: CGPoint(x: 1, y: 2),
+            button: .left,
+            flags: [],
+            clickCount: 2,
+            via: synth,
+            interruption: armedMonitor()
+        )
+        XCTAssertEqual(synth.events, [
+            .mouseDown(CGPoint(x: 1, y: 2), .left),
+            .mouseUp(CGPoint(x: 1, y: 2), .left),
+            .mouseDown(CGPoint(x: 1, y: 2), .left),
+            .mouseUp(CGPoint(x: 1, y: 2), .left),
+        ])
+    }
+
+    func testTripleClickEmitsThreeDownUpPairs() {
+        let synth = FakeSynthesizer()
+        PointerActions.click(
+            atGlobal: .zero,
+            button: .left,
+            flags: [],
+            clickCount: 3,
+            via: synth,
+            interruption: armedMonitor()
+        )
+        XCTAssertEqual(synth.events.count, 6)
+        XCTAssertEqual(synth.events.filter { if case .mouseDown = $0 { return true }; return false }.count, 3)
+        XCTAssertEqual(synth.events.filter { if case .mouseUp = $0 { return true }; return false }.count, 3)
+    }
+
+    func testMiddleClickUsesMiddleButton() {
+        let synth = FakeSynthesizer()
+        PointerActions.click(atGlobal: CGPoint(x: 5, y: 5), button: .middle, flags: [], via: synth, interruption: armedMonitor())
+        XCTAssertEqual(synth.events, [
+            .mouseDown(CGPoint(x: 5, y: 5), .middle),
+            .mouseUp(CGPoint(x: 5, y: 5), .middle),
+        ])
+    }
+
+    func testRightClickUsesRightButton() {
+        let synth = FakeSynthesizer()
+        PointerActions.click(atGlobal: CGPoint(x: 3, y: 4), button: .right, flags: [], via: synth, interruption: armedMonitor())
+        XCTAssertEqual(synth.events, [
+            .mouseDown(CGPoint(x: 3, y: 4), .right),
+            .mouseUp(CGPoint(x: 3, y: 4), .right),
+        ])
+    }
+
     func testClickSkipsWhenAlreadyInterrupted() {
         let synth = FakeSynthesizer()
         let monitor = InterruptionState()
@@ -27,6 +78,38 @@ final class PointerActionsTests: XCTestCase {
         monitor.observe(isOurs: false, at: 1.0) // interrupted before delivery
         PointerActions.click(atGlobal: .zero, button: .left, flags: [], via: synth, interruption: monitor)
         XCTAssertTrue(synth.events.isEmpty, "no input is delivered once interrupted")
+    }
+
+    func testMultiClickStopsBetweenUnitsOnInterruption() {
+        let synth = FakeSynthesizer()
+        let monitor = InterruptionState()
+        monitor.arm()
+        var count = 0
+        synth.onEmit = {
+            count += 1
+            // After first down/up pair (2 events), interrupt before unit 2.
+            if count == 2 { monitor.observe(isOurs: false, at: 1.0) }
+        }
+        PointerActions.click(
+            atGlobal: .zero,
+            button: .left,
+            flags: [],
+            clickCount: 3,
+            via: synth,
+            interruption: monitor
+        )
+        XCTAssertEqual(synth.events.count, 2, "only the first click unit is delivered after interruption")
+    }
+
+    func testPointerButtonEventTypes() {
+        XCTAssertEqual(PointerButton.left.downType, .leftMouseDown)
+        XCTAssertEqual(PointerButton.left.upType, .leftMouseUp)
+        XCTAssertEqual(PointerButton.right.downType, .rightMouseDown)
+        XCTAssertEqual(PointerButton.right.upType, .rightMouseUp)
+        XCTAssertEqual(PointerButton.middle.downType, .otherMouseDown)
+        XCTAssertEqual(PointerButton.middle.upType, .otherMouseUp)
+        XCTAssertEqual(PointerButton.middle.cgButton, .center)
+        XCTAssertEqual(PointerButton.middle.dragType, .otherMouseDragged)
     }
 
     // MARK: - Drag
@@ -93,5 +176,12 @@ final class PointerActionsTests: XCTestCase {
         XCTAssertEqual(PointerActions.scrollDeltas(direction: .down, by: .page, count: 1).deltaY, -10)
         // Horizontal directions leave the other axis at 0.
         XCTAssertEqual(PointerActions.scrollDeltas(direction: .up, by: .line, count: 1).deltaX, 0)
+    }
+
+    func testScrollDeltasFractionalPage() {
+        // Half a page → half of 10 line-units → 5.
+        XCTAssertEqual(PointerActions.scrollDeltas(direction: .down, by: .page, count: 0.5).deltaY, -5)
+        // Integer Double remains compatible with historical Int call sites.
+        XCTAssertEqual(PointerActions.scrollDeltas(direction: .down, by: .line, count: 2.0).deltaY, -6)
     }
 }

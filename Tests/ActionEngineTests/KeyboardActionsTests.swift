@@ -182,4 +182,62 @@ final class KeyboardActionsTests: XCTestCase {
         XCTAssertEqual(emitted, 2)
         XCTAssertEqual(synth.events, [.type("h"), .type("é")])
     }
+
+    func testXdotoolModifierAliases() {
+        XCTAssertEqual(Keymap.modifier(for: "super"), .maskCommand)
+        XCTAssertEqual(Keymap.modifier(for: "meta"), .maskCommand)
+        XCTAssertEqual(Keymap.modifier(for: "control"), .maskControl)
+        XCTAssertEqual(Keymap.modifier(for: "alt"), .maskAlternate)
+        XCTAssertEqual(Keymap.modifier(for: "SUPER"), .maskCommand)
+        XCTAssertEqual(Keymap.modifier(for: "Control"), .maskControl)
+        XCTAssertEqual(Keymap.modifier(for: "ALT"), .maskAlternate)
+        // Old tokens still resolve.
+        XCTAssertEqual(Keymap.modifier(for: "cmd"), .maskCommand)
+        XCTAssertEqual(Keymap.modifier(for: "ctrl"), .maskControl)
+        XCTAssertEqual(Keymap.modifier(for: "opt"), .maskAlternate)
+    }
+
+    func testXdotoolKeyAliases() {
+        XCTAssertEqual(Keymap.keyCode(for: "Page_Up"), 0x74)
+        XCTAssertEqual(Keymap.keyCode(for: "page_up"), 0x74)
+        XCTAssertEqual(Keymap.keyCode(for: "PAGE_UP"), 0x74)
+        XCTAssertEqual(Keymap.keyCode(for: "Page_Down"), 0x79)
+        XCTAssertEqual(Keymap.keyCode(for: "Insert"), 0x72)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_0"), 0x52)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_9"), 0x5C)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Enter"), 0x4C)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Add"), 0x45)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Subtract"), 0x4E)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Multiply"), 0x43)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Divide"), 0x4B)
+        XCTAssertEqual(Keymap.keyCode(for: "KP_Decimal"), 0x41)
+        // Legacy tokens retained.
+        XCTAssertEqual(Keymap.keyCode(for: "pageup"), 0x74)
+        XCTAssertEqual(Keymap.keyCode(for: "delete"), 0x33)
+        XCTAssertEqual(Keymap.keyCode(for: "Delete"), 0x33)
+    }
+
+    func testXdotoolAliasChordsParse() throws {
+        let chords = try KeyChord.parse("super+c")
+        XCTAssertEqual(chords.count, 1)
+        XCTAssertEqual(chords[0].keyCode, 0x08)
+        XCTAssertTrue(chords[0].flags.contains(.maskCommand))
+
+        let page = try KeyChord.parse("Page_Up")
+        XCTAssertEqual(page[0].keyCode, 0x74)
+
+        let kp = try KeyChord.parse("KP_Enter")
+        XCTAssertEqual(kp[0].keyCode, 0x4C)
+    }
+
+    func testUnknownTokensStillStrict() {
+        XCTAssertThrowsError(try KeyChord.parse("hyper+a")) { error in
+            guard let e = error as? KeyChordError else { return XCTFail("expected KeyChordError") }
+            XCTAssertTrue(e.message.contains("hyper"))
+        }
+        XCTAssertThrowsError(try KeyChord.parse("cmd+kittens")) { error in
+            guard let e = error as? KeyChordError else { return XCTFail("expected KeyChordError") }
+            XCTAssertTrue(e.message.contains("kittens"))
+        }
+    }
 }

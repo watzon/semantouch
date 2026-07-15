@@ -1,0 +1,53 @@
+{
+  "name": "@watzon/semantouch",
+  "version": "0.3.0",
+  "description": "Thin macOS bootstrap CLI for the signed Semantouch.app computer-use helper.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "semantouch": "bin/semantouch.js"
+  },
+  "main": "lib/index.js",
+  "files": [
+    "bin",
+    "lib",
+    "release-digest.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/watzon/semantouch.git",
+    "directory": "npm/semantouch"
+  },
+  "homepage": "https://github.com/watzon/semantouch/tree/main/npm/semantouch",
+  "bugs": {
+    "url": "https://github.com/watzon/semantouch/issues"
+  },
+  "keywords": [
+    "semantouch",
+    "mcp",
+    "macos",
+    "computer-use",
+    "accessibility",
+    "bootstrap"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

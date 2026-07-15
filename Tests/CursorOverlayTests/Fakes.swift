@@ -71,6 +71,82 @@ final class NeverSettlingAnimator: CursorAnimating {
     func stop() { stopCount += 1 }
 }
 
+/// Token returned by `FakeIdleCleanupScheduler`. Cancel is recorded and makes `fire` a no-op.
+final class FakeIdleCleanupToken: CursorIdleCleanupCancelling {
+    private weak var scheduler: FakeIdleCleanupScheduler?
+    let id: UInt64
+    private(set) var isCancelled = false
+
+    fileprivate init(id: UInt64, scheduler: FakeIdleCleanupScheduler) {
+        self.id = id
+        self.scheduler = scheduler
+    }
+
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        scheduler?.noteCancel(id: id)
+    }
+}
+
+/// Injectable idle-cleanup scheduler for controller lifecycle tests. Never uses the wall
+/// clock: work is recorded and fired only when a test explicitly drains it.
+final class FakeIdleCleanupScheduler: CursorIdleCleanupScheduling {
+    struct Pending {
+        let id: UInt64
+        let delay: TimeInterval
+        let work: @Sendable () -> Void
+        let token: FakeIdleCleanupToken
+    }
+
+    private var nextID: UInt64 = 1
+    private(set) var pending: [Pending] = []
+    private(set) var scheduledDelays: [TimeInterval] = []
+    private(set) var cancelCount = 0
+
+    func schedule(
+        after delay: TimeInterval,
+        execute work: @escaping @Sendable () -> Void
+    ) -> any CursorIdleCleanupCancelling {
+        let id = nextID
+        nextID += 1
+        let token = FakeIdleCleanupToken(id: id, scheduler: self)
+        pending.append(Pending(id: id, delay: delay, work: work, token: token))
+        scheduledDelays.append(delay)
+        return token
+    }
+
+    /// Fire the oldest non-cancelled pending item (FIFO). Returns false when nothing is live.
+    @discardableResult
+    func fireNext() -> Bool {
+        while let first = pending.first {
+            pending.removeFirst()
+            if first.token.isCancelled { continue }
+            first.work()
+            return true
+        }
+        return false
+    }
+
+    /// Fire every currently live pending item in order.
+    func fireAll() {
+        while fireNext() {}
+    }
+
+    /// Live (not yet cancelled) pending callbacks.
+    var liveCount: Int { pending.filter { !$0.token.isCancelled }.count }
+
+    /// Most recent scheduled delay, if any.
+    var lastDelay: TimeInterval? { scheduledDelays.last }
+
+    fileprivate func noteCancel(id: UInt64) {
+        cancelCount += 1
+        // Keep the entry so tests can still observe that a stale fire is a no-op after cancel;
+        // `fireNext` skips cancelled tokens.
+        _ = id
+    }
+}
+
 // Common fixtures.
 extension Rect {
     /// A window at global (100, 200), 400×300 points — the standard overlay fixture.

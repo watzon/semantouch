@@ -1,4 +1,6 @@
 import Foundation
+import ApplicationServices
+import CoreGraphics
 import ComputerUseCore
 import AccessibilityEngine
 import ActionEngine
@@ -200,9 +202,10 @@ public final class ServiceContext: @unchecked Sendable {
 
     /// The `FallbackEnvironment` binding this context to the executor's Phase 4 path (§16):
     /// the same environment, plus the fallback seams (target pid, geometry, workspace,
-    /// synthesizer, interruption).
+    /// synthesizer, interruption) and optional AX reliability capabilities (coordinate
+    /// click resolve / press element + focused-element lookup for string AXValue append).
     public func fallbackEnvironment() -> FallbackEnvironment {
-        ServiceActionEnvironment(context: self, resolver: appResolver)
+        ServiceReliabilityEnvironment(context: self, resolver: appResolver)
     }
 
     // MARK: - Element tables
@@ -340,5 +343,195 @@ public final class ServiceContext: @unchecked Sendable {
     public func markSessionDirty(sessionId: String) {
         guard let pid = sessionManager.session(id: sessionId)?.pid else { return }
         observerCoordinator.state.markDirty(pid: pid)
+    }
+}
+
+
+// MARK: - Optional AX reliability environment (coordinate press + focused AXValue)
+
+/// Class-bound wrapper over `ServiceActionEnvironment` that exposes the optional
+/// `CoordinateClickResolving` and `FocusedElementProviding` capabilities used by the
+/// Phase-4 reliability integration. Existing struct-based fakes remain free of these
+/// methods; only the live service path opts in.
+final class ServiceReliabilityEnvironment: FallbackEnvironment, CoordinateClickResolving, FocusedElementProviding {
+    private let base: ServiceActionEnvironment
+    private let context: ServiceContext
+    private let hitTester: AXClickTargetResolver.LiveHitTester
+
+    init(context: ServiceContext, resolver: AppResolver) {
+        self.context = context
+        self.base = ServiceActionEnvironment(context: context, resolver: resolver)
+        self.hitTester = LiveAXClickHitTester(client: context.axClient)
+    }
+
+    // MARK: ActionEnvironment / FallbackEnvironment
+
+    func policyCheck(app: String) throws -> PolicyDenyReason? { try base.policyCheck(app: app) }
+    func currentRevision(sessionId: String) -> Int? { base.currentRevision(sessionId: sessionId) }
+    func sessionOwnedByApp(sessionId: String, app: String) throws -> Bool {
+        try base.sessionOwnedByApp(sessionId: sessionId, app: app)
+    }
+    func resolveElement(sessionId: String, elementId: String, revision: Int) throws -> ActionElement {
+        try base.resolveElement(sessionId: sessionId, elementId: elementId, revision: revision)
+    }
+    func targetPID(sessionId: String) -> pid_t? { base.targetPID(sessionId: sessionId) }
+    func windowGeometry(sessionId: String) -> WindowGeometry? { base.windowGeometry(sessionId: sessionId) }
+    func currentWindowFrame(sessionId: String) -> Rect? { base.currentWindowFrame(sessionId: sessionId) }
+    var workspace: WorkspaceControlling { base.workspace }
+    var synthesizer: InputSynthesizer { base.synthesizer }
+    var interruption: InterruptionMonitoring { base.interruption }
+
+    // MARK: CoordinateClickResolving
+
+    /// Live hit-test → pure selection. Never posts input / never AXPresses.
+    /// Returns `nil` on miss so the executor keeps the original mapped coordinate.
+    func resolveCoordinateClick(
+        atGlobal point: CGPoint,
+        windowBounds: Rect,
+        expectedPID: pid_t
+    ) -> AXCoordinateClickResolution? {
+        let live = AXClickTargetResolver.resolve(
+            point: Point(x: Double(point.x), y: Double(point.y)),
+            windowBounds: windowBounds,
+            expectedPID: expectedPID,
+            hitTester: hitTester
+        )
+        guard live.resolution.didResolve,
+              let action = live.resolution.action else {
+            return nil
+        }
+        let activation: AXCoordinateClickActivation = (action == .press) ? .press : .coordinate
+        var pressElement: ActionElement?
+        var selectedPID: pid_t?
+        var selectedFrame: Rect?
+        if let selected = live.selectedElement {
+            selectedPID = selected.pid
+            selectedFrame = selected.frame
+            if let liveAX = selected as? LiveAXClickElement {
+                pressElement = StringAXValueActionElement(
+                    element: liveAX.element,
+                    client: context.axClient
+                )
+            }
+        }
+        return AXCoordinateClickResolution(
+            activation: activation,
+            anchor: live.resolution.anchor,
+            reason: live.resolution.reason,
+            evidenceNotes: live.resolution.evidence.notes,
+            pressElement: pressElement,
+            selectedPID: selectedPID,
+            selectedFrame: selectedFrame
+        )
+    }
+
+    // MARK: FocusedElementProviding
+
+    /// Target application's `AXFocusedUIElement`, only when its PID matches `pid`.
+    func focusedElement(forPID pid: pid_t) -> ActionElement? {
+        let app = context.axClient.applicationElement(pid: pid)
+        guard let focused = context.axClient.focusedUIElement(of: app) else { return nil }
+        guard let elementPID = try? context.axClient.pid(of: focused), elementPID == pid else {
+            return nil
+        }
+        return StringAXValueActionElement(element: focused, client: context.axClient)
+    }
+}
+
+/// Live `ActionElement` that also exposes typed string `AXValue` (not stringified snapshot).
+///
+/// Used for both coordinate-press targets and focused-element type_text append. Public AX
+/// APIs only via `AXClient`.
+final class StringAXValueActionElement: ActionElement, StringAXValueCapable {
+    private let axElement: AXUIElement
+    private let client: AXClient
+    private let handle: AXElementHandle
+
+    init(element: AXUIElement, client: AXClient) {
+        self.axElement = element
+        self.client = client
+        self.handle = AXElementHandle(element)
+    }
+
+    // MARK: ActionElement
+
+    var isLive: Bool { handle.isLive }
+    var role: String? { client.role(of: axElement) }
+    func actionNames() -> [String] { client.actionNames(of: axElement) }
+    func perform(_ action: String) throws { try client.performAction(axElement, action) }
+    func isSettable(_ attribute: String) -> Bool { client.isSettable(axElement, attribute) }
+
+    func snapshot(_ attribute: String) -> String? {
+        guard let value = try? client.copyAttribute(axElement, attribute) else { return nil }
+        return Self.stringify(value)
+    }
+
+    func writeValue(_ value: ActionValue) throws {
+        let cf: CFTypeRef
+        switch value {
+        case let .string(string): cf = string as CFString
+        case let .number(number): cf = NSNumber(value: number)
+        case let .boolean(flag): cf = (flag ? kCFBooleanTrue : kCFBooleanFalse) as CFTypeRef
+        }
+        try client.setAttribute(axElement, AXActionName.value, value: cf)
+    }
+
+    func writeSelectedRange(location: Int, length: Int) throws {
+        var range = CFRange(location: location, length: length)
+        guard let axValue = AXValueCreate(.cfRange, &range) else {
+            throw CUError.internalError(detail: "failed to create AXValue for CFRange")
+        }
+        try client.setAttribute(axElement, AXActionName.selectedTextRange, value: axValue)
+    }
+
+    func element(for attribute: String) -> ActionElement? {
+        guard let child = client.copyElement(axElement, attribute) else { return nil }
+        return StringAXValueActionElement(element: child, client: client)
+    }
+
+    func children() -> [ActionElement] {
+        client.children(of: axElement).map { StringAXValueActionElement(element: $0, client: client) }
+    }
+
+    func setKeyboardFocus() -> Bool {
+        guard client.isSettable(axElement, AXActionName.focused) else { return false }
+        do {
+            try client.setAttribute(axElement, AXActionName.focused, value: kCFBooleanTrue)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func holdsKeyboardFocus() -> Bool {
+        guard let pid = try? client.pid(of: axElement) else { return false }
+        let app = client.applicationElement(pid: pid)
+        guard let focused = client.focusedUIElement(of: app) else { return false }
+        return CFEqual(focused, axElement)
+    }
+
+    // MARK: StringAXValueCapable
+
+    /// Live `AXValue` only when it is a real String (not NSNumber / CFBoolean).
+    func stringAXValue() -> String? {
+        guard let raw = try? client.copyAttribute(axElement, AXActionName.value) else { return nil }
+        return raw as? String
+    }
+
+    func canSetStringAXValue() -> Bool {
+        client.isSettable(axElement, AXActionName.value)
+    }
+
+    func writeStringAXValue(_ value: String) throws {
+        try client.setAttribute(axElement, AXActionName.value, value: value as CFString)
+    }
+
+    private static func stringify(_ value: CFTypeRef) -> String? {
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return CFBooleanGetValue((value as! CFBoolean)) ? "1" : "0"
+        }
+        if let number = value as? NSNumber { return number.stringValue }
+        if let string = value as? String { return string }
+        return nil
     }
 }

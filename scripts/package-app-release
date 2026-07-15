@@ -1,0 +1,101 @@
+#!/bin/sh
+# Package a signed (and preferably stapled) Semantouch.app into the canonical
+# immutable ZIP + DMG artifacts with SHA-256 sidecars.
+#
+# Does not mutate the source app. DMG is signed with the provided identity;
+# notarization/stapling of the DMG is left to scripts/notarize-release.
+#
+# usage:
+#   scripts/package-app-release /path/to/Semantouch.app /path/to/dist VERSION \
+#     'Developer ID Application: Name (TEAMID)'
+set -eu
+
+if [ "$#" -ne 4 ]; then
+  printf '%s\n' \
+    "usage: $0 /path/to/Semantouch.app /path/to/dist VERSION 'Developer ID Application: Name (TEAMID)'" >&2
+  exit 2
+fi
+
+app_path=$1
+dist_dir=$2
+version=$3
+identity=$4
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+die() {
+  printf '%s\n' "package-app-release: $*" >&2
+  exit 1
+}
+
+if [ ! -d "$app_path" ]; then
+  die "app bundle not found: $app_path"
+fi
+case $(basename -- "$app_path") in
+  Semantouch.app) ;;
+  *)
+    die "expected bundle named Semantouch.app (got: $(basename -- "$app_path"))"
+    ;;
+esac
+
+if [ -z "$version" ]; then
+  die "version is required"
+fi
+
+/bin/mkdir -p "$dist_dir"
+
+# Contract-check the source app before packaging (no notarization required here;
+# CI enables SEMANTOUCH_REQUIRE_NOTARIZATION=1 after staple).
+"$script_dir/verify-app-release" "$app_path" "$version"
+
+zip_name="Semantouch-v${version}-macos-universal2.zip"
+dmg_name="Semantouch-v${version}-macos-universal2.dmg"
+zip_path="$dist_dir/$zip_name"
+dmg_path="$dist_dir/$dmg_name"
+
+if [ -e "$zip_path" ]; then
+  /bin/rm -f "$zip_path"
+fi
+if [ -e "$dmg_path" ]; then
+  /bin/rm -f "$dmg_path"
+fi
+
+# Keep macOS metadata inline. `--sequesterRsrc` would add a second `__MACOSX`
+# top-level tree, violating the bootstrap's one-app archive contract.
+/usr/bin/ditto -c -k --keepParent "$app_path" "$zip_path"
+
+stage=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-dmg.XXXXXX")
+trap '/bin/rm -rf "$stage"' EXIT HUP INT TERM
+/usr/bin/ditto "$app_path" "$stage/Semantouch.app"
+/bin/ln -s /Applications "$stage/Applications"
+
+/usr/bin/hdiutil create \
+  -volname "Semantouch" \
+  -srcfolder "$stage" \
+  -ov \
+  -format UDZO \
+  "$dmg_path"
+
+/usr/bin/codesign \
+  --force \
+  --timestamp \
+  --sign "$identity" \
+  "$dmg_path"
+
+(
+  CDPATH= cd -- "$dist_dir"
+  /usr/bin/shasum -a 256 "$zip_name" > "${zip_name}.sha256"
+  /usr/bin/shasum -a 256 "$dmg_name" > "${dmg_name}.sha256"
+)
+
+# Fail closed if sidecars do not match the files they name.
+zip_sum=$(/usr/bin/awk 'NF { print $1; exit }' "$dist_dir/${zip_name}.sha256")
+dmg_sum=$(/usr/bin/awk 'NF { print $1; exit }' "$dist_dir/${dmg_name}.sha256")
+zip_actual=$(/usr/bin/shasum -a 256 "$zip_path" | /usr/bin/awk '{ print $1 }')
+dmg_actual=$(/usr/bin/shasum -a 256 "$dmg_path" | /usr/bin/awk '{ print $1 }')
+if [ "$zip_sum" != "$zip_actual" ] || [ "$dmg_sum" != "$dmg_actual" ]; then
+  die "checksum sidecar mismatch for packaged artifacts"
+fi
+
+printf '%s\n' "package-app-release: $zip_path"
+printf '%s\n' "package-app-release: $dmg_path"

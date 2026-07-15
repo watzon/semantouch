@@ -67,4 +67,18 @@ final class SemanticActionsTests: XCTestCase {
         }
         XCTAssertTrue(element.performed.isEmpty)
     }
+
+    func testClickRepeatedPerformsAXPressNTimes() throws {
+        let element = FakeActionElement(actions: [AXActionName.press])
+        let result = try SemanticActions.click(element, elementId: "e1", clickCount: 3)
+        XCTAssertEqual(element.performed, [AXActionName.press, AXActionName.press, AXActionName.press])
+        XCTAssertEqual(result.status, .completed)
+        XCTAssertEqual(result.method, .accessibility)
+    }
+
+    func testUsesAXPressOnlyForLeft() {
+        XCTAssertTrue(SemanticActions.usesAXPress(button: .left))
+        XCTAssertFalse(SemanticActions.usesAXPress(button: .right))
+        XCTAssertFalse(SemanticActions.usesAXPress(button: .middle))
+    }
 }

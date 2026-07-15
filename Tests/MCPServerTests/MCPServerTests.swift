@@ -12,7 +12,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(MCPServer.serverName, "semantouch")
         XCTAssertEqual(MCPServer.mcpProtocolVersion, "2025-06-18")
         XCTAssertEqual(MCPServer.contractVersion, "semantouch/1")
-        XCTAssertEqual(MCPServer.serverVersion, "0.2.1")
+        XCTAssertEqual(MCPServer.serverVersion, "0.3.0")
     }
 
     func testHandledMethodSet() {
@@ -37,10 +37,27 @@ final class MCPServerTests: XCTestCase {
     func testInitializeGoldenResponse() throws {
         let server = MCPServer()
         let response = server.process(request(id: 1, method: "initialize", params: "{}"))
-        XCTAssertEqual(
-            response,
-            #"{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2025-06-18","serverInfo":{"name":"semantouch","version":"0.2.1"}}}"#
-        )
+        // Keys are sorted lexicographically by JSONValue.serialized(); the additive
+        // `instructions` field sits between `capabilities` and `protocolVersion`.
+        let golden = JSONValue.object([
+            "id": .int(1),
+            "jsonrpc": .string("2.0"),
+            "result": MCPServer.initializeResult(),
+        ]).serialized()
+        XCTAssertEqual(response, golden)
+
+        // Pin the exact additive instructions field for harness-agnostic guidance.
+        let parsed = try parse(response)
+        XCTAssertEqual(parsed["result"]?["instructions"]?.stringValue, MCPServer.initializeInstructions)
+        let instructions = try XCTUnwrap(parsed["result"]?["instructions"]?.stringValue)
+        XCTAssertTrue(instructions.contains("once at the start of each assistant turn"))
+        XCTAssertTrue(instructions.contains("stale_revision"))
+        XCTAssertTrue(instructions.contains("stale_element"))
+        XCTAssertTrue(instructions.contains("semantic"))
+        XCTAssertTrue(instructions.contains("background-only"))
+        XCTAssertTrue(instructions.contains("does not advance the revision"))
+        XCTAssertTrue(instructions.contains("attach refreshed state"))
+        XCTAssertTrue(instructions.contains("untrusted data"))
     }
 
     func testInitializeIgnoresClientProposedVersion() throws {
@@ -74,6 +91,52 @@ final class MCPServerTests: XCTestCase {
         initialize(server)
         XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#))
         XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/anything"}"#))
+        XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/turn-ended"}"#))
+        XCTAssertNil(server.process(
+            #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"reason":"agent finished"}}"#
+        ))
+    }
+
+    /// `notifications/turn-ended` is forwarded to the injected callback and produces no reply.
+    /// Unknown notifications never invoke the callback. Cancellation stays internal.
+    func testTurnEndedNotificationInvokesCallbackWithoutReply() {
+        let seen = NotificationRecorder()
+        let server = MCPServer(onNotification: { method, params in
+            seen.append(method, params)
+        })
+        initialize(server)
+
+        XCTAssertNil(server.process(
+            #"{"jsonrpc":"2.0","method":"notifications/turn-ended","params":{"reason":"done"}}"#
+        ))
+        let events = seen.snapshot()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].0, "notifications/turn-ended")
+        XCTAssertEqual(events[0].1?["reason"]?.stringValue, "done")
+    }
+
+    func testUnknownNotificationDoesNotInvokeCallback() {
+        let seen = NotificationRecorder()
+        let server = MCPServer(onNotification: { method, params in
+            seen.append(method, params)
+        })
+        initialize(server)
+
+        XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/anything"}"#))
+        XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#))
+        // Cancellation is handled internally and must NOT reach the host callback.
+        XCTAssertNil(server.process(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99,"reason":"x"}}"#
+        ))
+
+        XCTAssertEqual(seen.snapshot().count, 0, "unknown/cancelled/initialized must not invoke the callback")
+    }
+
+    func testDefaultNotificationCallbackIsNoOp() {
+        // Default init keeps the no-op callback; turn-ended is still a silent notification.
+        let server = MCPServer()
+        initialize(server)
+        XCTAssertNil(server.process(#"{"jsonrpc":"2.0","method":"notifications/turn-ended"}"#))
     }
 
     // MARK: Error mapping
@@ -120,9 +183,9 @@ final class MCPServerTests: XCTestCase {
         let response = try parse(server.process(request(id: 20, method: "tools/list")))
         let tools = try XCTUnwrap(response["result"]?["tools"]?.arrayValue)
         let names = tools.compactMap { $0["name"]?.stringValue }
-        // Phase 1 read-only + v1.5 screenshot + Phase 2 semantic actions + Phase 4 fallback
-        // input + v1.5 wait_for.
-        XCTAssertEqual(names, ["doctor", "list_apps", "get_app_state", "screenshot", "end_app_session",
+        // Phase 1 read-only + read_text + v1.5 screenshot + Phase 2 semantic actions + Phase 4
+        // fallback input + v1.5 wait_for.
+        XCTAssertEqual(names, ["doctor", "list_apps", "launch_app", "get_app_state", "read_text", "screenshot", "end_app_session",
                                "click", "perform_action", "set_value", "select_text", "scroll",
                                "press_key", "type_text", "drag", "wait_for"])
 
@@ -130,6 +193,42 @@ final class MCPServerTests: XCTestCase {
             XCTAssertNotNil(tool["description"]?.stringValue)
             XCTAssertEqual(tool["inputSchema"]?["type"]?.stringValue, "object")
         }
+    }
+
+    func testToolDescriptorsEmitConservativeAnnotations() throws {
+        let server = MCPServer()
+        initialize(server)
+        let response = try parse(server.process(request(id: 22, method: "tools/list")))
+        let tools = try XCTUnwrap(response["result"]?["tools"]?.arrayValue)
+        let byName = Dictionary(
+            uniqueKeysWithValues: tools.compactMap { tool -> (String, JSONValue)? in
+                guard let name = tool["name"]?.stringValue,
+                      let annotations = tool["annotations"]
+                else { return nil }
+                return (name, annotations)
+            }
+        )
+
+        XCTAssertEqual(byName.count, tools.count)
+        XCTAssertEqual(byName["get_app_state"]?["readOnlyHint"]?.boolValue, true)
+        XCTAssertEqual(byName["get_app_state"]?["destructiveHint"]?.boolValue, false)
+        XCTAssertEqual(byName["get_app_state"]?["idempotentHint"]?.boolValue, true)
+        XCTAssertEqual(byName["get_app_state"]?["openWorldHint"]?.boolValue, true)
+
+        // doctor may show onboarding, so conservatively avoid a read-only claim.
+        XCTAssertEqual(byName["doctor"]?["readOnlyHint"]?.boolValue, false)
+        XCTAssertEqual(byName["doctor"]?["destructiveHint"]?.boolValue, false)
+        XCTAssertEqual(byName["doctor"]?["idempotentHint"]?.boolValue, true)
+
+        XCTAssertEqual(byName["click"]?["readOnlyHint"]?.boolValue, false)
+        XCTAssertEqual(byName["click"]?["destructiveHint"]?.boolValue, true)
+        XCTAssertEqual(byName["click"]?["idempotentHint"]?.boolValue, false)
+        XCTAssertEqual(byName["click"]?["openWorldHint"]?.boolValue, true)
+
+        XCTAssertEqual(byName["end_app_session"]?["readOnlyHint"]?.boolValue, false)
+        XCTAssertEqual(byName["end_app_session"]?["destructiveHint"]?.boolValue, false)
+        XCTAssertEqual(byName["end_app_session"]?["idempotentHint"]?.boolValue, true)
+        XCTAssertEqual(byName["end_app_session"]?["openWorldHint"]?.boolValue, false)
     }
 
     func testDoctorDescriptorSchemaIsExact() throws {
@@ -334,6 +433,47 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(lhs, rhs)
     }
 
+    // MARK: - SchemaValidator oneOf (read_text.limit)
+
+    func testSchemaValidatorOneOfAcceptsExactlyOneMatch() throws {
+        let limitSchema: JSONValue = .object([
+            "oneOf": .array([
+                .object(["type": "integer", "minimum": .int(1)]),
+                .object(["type": "string", "enum": .array([.string("max")])]),
+            ]),
+        ])
+        XCTAssertNil(SchemaValidator.validate(.int(4096), schema: limitSchema))
+        XCTAssertNil(SchemaValidator.validate(.int(1), schema: limitSchema))
+        XCTAssertNil(SchemaValidator.validate(.string("max"), schema: limitSchema))
+
+        // No match.
+        XCTAssertNotNil(SchemaValidator.validate(.int(0), schema: limitSchema))
+        XCTAssertNotNil(SchemaValidator.validate(.string("full"), schema: limitSchema))
+        XCTAssertNotNil(SchemaValidator.validate(.bool(true), schema: limitSchema))
+
+        // Existing type/enum/minimum behavior is preserved alongside oneOf.
+        let typed: JSONValue = .object([
+            "type": "string",
+            "enum": .array([.string("a"), .string("b")]),
+        ])
+        XCTAssertNil(SchemaValidator.validate(.string("a"), schema: typed))
+        XCTAssertNotNil(SchemaValidator.validate(.string("c"), schema: typed))
+        XCTAssertNotNil(SchemaValidator.validate(.int(1), schema: typed))
+    }
+
+    func testSchemaValidatorOneOfRejectsMultipleMatches() throws {
+        // Both alternatives accept any string → multi-match failure.
+        let loose: JSONValue = .object([
+            "oneOf": .array([
+                .object(["type": "string"]),
+                .object(["type": "string"]),
+            ]),
+        ])
+        let reason = SchemaValidator.validate(.string("x"), schema: loose)
+        XCTAssertNotNil(reason)
+        XCTAssertTrue((reason ?? "").contains("more than one"))
+    }
+
     // MARK: - Helpers
 
     private func initialize(_ server: MCPServer) {
@@ -353,5 +493,21 @@ final class MCPServerTests: XCTestCase {
 
     private func parse(_ line: String?) throws -> JSONValue {
         try JSONValue.parse(try XCTUnwrap(line))
+    }
+}
+
+/// Thread-safe notification callback sink for @Sendable onNotification tests.
+private final class NotificationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [(String, JSONValue?)] = []
+
+    func append(_ method: String, _ params: JSONValue?) {
+        lock.lock(); defer { lock.unlock() }
+        events.append((method, params))
+    }
+
+    func snapshot() -> [(String, JSONValue?)] {
+        lock.lock(); defer { lock.unlock() }
+        return events
     }
 }
