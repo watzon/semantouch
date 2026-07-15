@@ -246,40 +246,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pack_out="$(npm pack --dry-run 2>&1)"
-          printf '%s\n' "$pack_out"
+          pack_manifest="$RUNNER_TEMP/npm-pack.json"
+          npm pack --dry-run --json > "$pack_manifest"
+          cat "$pack_manifest"
 
-          found_pin=0
-          while IFS= read -r line; do
-            case "$line" in
-              *"release-digest.json"*)
-                found_pin=1
-                ;;
-            esac
-            case "$line" in
-              *"npm notice"*"Tarball Contents"*|*"npm notice"*"Tarball Details"*|*"npm notice"*"Integrity"*|*"npm notice"*"package size"*|*"npm notice"*"unpacked size"*|*"npm notice"*"shasum"*|*"npm notice"*"filename"*|*"npm notice"*"total files"*|*"npm notice"*package.json*|*"npm notice"*README*|*"npm notice"*LICENSE*|*"npm notice"*bin/*|*"npm notice"*lib/*|*"npm notice"*release-digest.json*|*"npm notice"*"@watzon/semantouch"*|npm\ notice)
-                continue
-                ;;
-              *"npm notice"*)
-                path="$(printf '%s\n' "$line" | sed -n 's/^npm notice[[:space:]]*[0-9.]*[kKmMgGbB]*[[:space:]]*//p')"
-                if [[ -z "$path" ]]; then
-                  continue
-                fi
-                case "$path" in
-                  package.json|README.md|LICENSE|release-digest.json|bin/*|lib/*) ;;
-                  *)
-                    echo "unexpected pack path: $path" >&2
-                    exit 1
-                    ;;
-                esac
-                ;;
-            esac
-          done <<< "$pack_out"
+          node - "$pack_manifest" <<'NODE'
+          const fs = require("node:fs");
 
-          if [[ "$found_pin" != "1" ]]; then
-            echo "npm pack must include release-digest.json pin" >&2
-            exit 1
-          fi
+          const manifestPath = process.argv[2];
+          const entries = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          if (!Array.isArray(entries) || entries.length !== 1) {
+            throw new Error(`expected one npm pack result, got ${entries.length}`);
+          }
+
+          const files = entries[0].files;
+          if (!Array.isArray(files)) {
+            throw new Error("npm pack result is missing files");
+          }
+
+          const paths = files.map((file) => file.path);
+          if (new Set(paths).size !== paths.length) {
+            throw new Error("npm pack result contains duplicate paths");
+          }
+
+          const allowedExact = new Set([
+            "LICENSE",
+            "README.md",
+            "package.json",
+            "release-digest.json",
+          ]);
+          for (const path of paths) {
+            if (!allowedExact.has(path) && !path.startsWith("bin/") && !path.startsWith("lib/")) {
+              throw new Error(`unexpected pack path: ${path}`);
+            }
+          }
+
+          if (!paths.includes("release-digest.json")) {
+            throw new Error("npm pack must include release-digest.json pin");
+          }
+          NODE
 
       - name: Publish with OIDC provenance
         run: |
