@@ -612,9 +612,11 @@ install_app_atomic() {
   _dest_dir=$(dirname -- "$_dest_app")
   /bin/mkdir -p "$_dest_dir"
 
-  _incoming="$_dest_dir/.Semantouch.app.incoming.$$"
+  _incoming_root=$(/usr/bin/mktemp -d "$_dest_dir/.Semantouch.app.incoming.XXXXXX") ||
+    die "failed to create staging directory in $_dest_dir"
+  _incoming="$_incoming_root/Semantouch.app"
   _backup="$_dest_dir/.Semantouch.app.backup.$$"
-  /bin/rm -rf "$_incoming" "$_backup"
+  /bin/rm -rf "$_backup"
 
   /usr/bin/ditto "$_source_app" "$_incoming"
 
@@ -631,9 +633,10 @@ install_app_atomic() {
     if [ "$_had_previous" -eq 1 ] && [ -e "$_backup" ]; then
       /bin/mv -f "$_backup" "$_dest_app" || true
     fi
-    /bin/rm -rf "$_incoming"
+    /bin/rm -rf "$_incoming_root"
     die "failed to install $_dest_app"
   fi
+  /bin/rm -rf "$_incoming_root"
 
   # Post-install verification with backup retained for rollback.
   if ! try_verify_app_bundle "$_dest_app" "$version" "installed"; then

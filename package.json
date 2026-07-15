@@ -1,6 +1,6 @@
 {
   "name": "semantouch",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "Semantouch native macOS computer-use MCP server and OMP integration.",
   "homepage": "https://github.com/watzon/semantouch",

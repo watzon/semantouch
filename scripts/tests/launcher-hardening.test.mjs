@@ -383,6 +383,43 @@ z.close()
   }
 });
 
+test("installs and executes a valid downloaded release", () => {
+  const root = mkdtempSync(join(tmpdir(), "st-launch-"));
+  let server;
+  try {
+    const home = join(root, "home");
+    mkdirSync(join(home, "Applications"), { recursive: true });
+    const launcher = makePluginRoot(join(root, "plugin"), packageVersion);
+
+    const releaseDir = join(root, "release");
+    mkdirSync(releaseDir, { recursive: true });
+    const asset = `Semantouch-v${packageVersion}-macos-universal2.zip`;
+    const zipPath = join(releaseDir, asset);
+    const appStage = join(root, "appstage/Semantouch.app");
+    makeFakeApp(appStage, { marker: "downloaded" });
+    zipApp(appStage, zipPath);
+    writeSidecar(zipPath, join(releaseDir, `${asset}.sha256`), asset);
+    server = serveReleaseDir(releaseDir);
+
+    const result = runLauncher(launcher, {
+      home,
+      args: ["--version"],
+      baseUrl: server.baseUrl,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /relay-downloaded/);
+    assert.match(result.stdout, /--version/);
+    assert.equal(
+      existsSync(join(home, "Applications/Semantouch.app/Contents/MacOS/semantouch")),
+      true,
+    );
+  } finally {
+    server?.stop?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workflow strict-version / digest / immutability guards are present", () => {
   const release = readFileSync(join(repoRoot, ".github/workflows/release.yml"), "utf8");
   const npm = readFileSync(join(repoRoot, ".github/workflows/npm.yml"), "utf8");
