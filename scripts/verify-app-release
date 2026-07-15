@@ -267,10 +267,11 @@ if [ "$short_version" != "$expected_version" ]; then
   die "app version $short_version does not match expected $expected_version"
 fi
 
-# Verify nested Mach-Os from temp copies so display does not collapse to the
-# outer bundle, then verify the app bundle itself.
+# The relay has its own standalone signature, so inspect a temporary copy to
+# prevent codesign from resolving to the outer bundle. The host is the app's
+# CFBundleExecutable and must stay in place so codesign can read Info.plist.
 inspect_signature "$relay_bin" "relay" "$expected_relay_id" "no"
-inspect_signature "$host_bin" "host" "$expected_bundle_id" "no"
+inspect_signature "$host_bin" "host" "$expected_bundle_id" "yes"
 inspect_signature "$app_path" "app" "$expected_bundle_id" "yes"
 
 # Quarantine must not be present on a freshly assembled/signed CI artifact.

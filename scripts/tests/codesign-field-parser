@@ -49,4 +49,36 @@ EOF
   FIXTURE=$fixture /bin/sh -c '. "$1"' sh "$harness"
 done
 
+# A bundle's CFBundleExecutable signature seals Info.plist. Verify it in place:
+# detaching the same bytes must fail, which guards the verifier's host mode.
+test_app="$tmpdir/Test.app"
+test_host="$test_app/Contents/MacOS/TestHost"
+/bin/mkdir -p "$(dirname -- "$test_host")"
+/bin/cat /bin/echo > "$test_host"
+/bin/chmod 0755 "$test_host"
+/bin/cat > "$test_app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>TestHost</string>
+  <key>CFBundleIdentifier</key>
+  <string>tech.watzon.semantouch.codesign-regression</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+</dict>
+</plist>
+EOF
+/usr/bin/codesign --force --options runtime --sign - "$test_app"
+/usr/bin/codesign --verify --deep --strict "$test_host"
+
+detached_host="$tmpdir/TestHost.detached"
+/bin/cat "$test_host" > "$detached_host"
+/bin/chmod 0755 "$detached_host"
+if /usr/bin/codesign --verify --strict "$detached_host" >/dev/null 2>&1; then
+  printf '%s\n' 'codesign-field-parser: detached CFBundleExecutable unexpectedly verified' >&2
+  exit 1
+fi
+
 printf '%s\n' 'codesign-field-parser: ok'

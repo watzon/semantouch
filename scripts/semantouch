@@ -347,8 +347,9 @@ verify_app_bundle() {
     die "$_label version $_short_version does not match plugin version $_expected_version"
   fi
 
+  # The CFBundleExecutable must stay in its app so codesign can read Info.plist.
   inspect_signature "$_relay_bin" "$_label relay" "$expected_relay_id" "no" "$_scratch"
-  inspect_signature "$_host_bin" "$_label host" "$expected_bundle_id" "no" "$_scratch"
+  inspect_signature "$_host_bin" "$_label host" "$expected_bundle_id" "yes" "$_scratch"
   inspect_signature "$_app_path" "$_label app" "$expected_bundle_id" "yes" "$_scratch"
 
   if [ "$require_notarization" = "1" ]; then
