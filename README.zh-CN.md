@@ -50,7 +50,7 @@ Semantouch 只使用公开 Apple API，不依赖私有框架或专有 computer-u
 直接安装带标签的 release：
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.3.4
+omp plugin install github:watzon/semantouch#v0.3.5
 ```
 
 或者把本仓库添加为 marketplace，再安装目录中的条目：

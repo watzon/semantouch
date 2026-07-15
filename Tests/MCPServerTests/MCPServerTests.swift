@@ -12,7 +12,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(MCPServer.serverName, "semantouch")
         XCTAssertEqual(MCPServer.mcpProtocolVersion, "2025-06-18")
         XCTAssertEqual(MCPServer.contractVersion, "semantouch/1")
-        XCTAssertEqual(MCPServer.serverVersion, "0.3.4")
+        XCTAssertEqual(MCPServer.serverVersion, "0.3.5")
     }
 
     func testHandledMethodSet() {

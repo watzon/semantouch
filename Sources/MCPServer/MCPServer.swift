@@ -31,7 +31,7 @@ public final class MCPServer: @unchecked Sendable {
     public static let serverName = "semantouch"
 
     /// `serverInfo.version` (semver). v1.5 (§18) — web content and verified transitions.
-    public static let serverVersion = "0.3.4"
+    public static let serverVersion = "0.3.5"
 
     /// Protocol identifier for this contract.
     public static let contractVersion = "semantouch/1"

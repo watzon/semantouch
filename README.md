@@ -52,7 +52,7 @@ A Swift toolchain and `just` are needed only for source builds and development.
 Install a tagged release directly:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.3.4
+omp plugin install github:watzon/semantouch#v0.3.5
 ```
 
 Alternatively, add this repository as a marketplace and install its catalog entry:
