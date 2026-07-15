@@ -34,6 +34,7 @@ jobs:
           /bin/sh -n scripts/semantouch
           /bin/sh -n scripts/sign-release
           /bin/sh -n scripts/notarize-release
+          scripts/tests/codesign-field-parser
           /usr/bin/plutil -lint packaging/Release.entitlements
 
       - name: Build

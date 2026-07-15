@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmpdir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/semantouch-codesign-parser.XXXXXX")
+trap '/bin/rm -rf "$tmpdir"' EXIT HUP INT TERM
+
+fixture='Executable=/tmp/Semantouch.app/Contents/MacOS/semantouch
+Identifier=tech.watzon.semantouch.cli
+Format=Mach-O universal (x86_64 arm64)
+CodeDirectory v=20500 size=1234 flags=0x10000(runtime) hashes=28+7 location=embedded
+Authority=Developer ID Application: Watzon Ventures LLc (MB5789APU7)
+TeamIdentifier=MB5789APU7
+Timestamp=Jul 14, 2026 at 8:00:00 PM'
+
+for source in "$project_root/scripts/verify-app-release" "$project_root/scripts/semantouch"; do
+  harness="$tmpdir/$(basename -- "$source").sh"
+  /usr/bin/awk '
+    /^codesign_field\(\) \{/ { copying = 1 }
+    copying { print }
+    copying && /^}$/ { exit }
+  ' "$source" > "$harness"
+
+  if [ ! -s "$harness" ]; then
+    printf '%s\n' "codesign-field-parser: codesign_field not found in $source" >&2
+    exit 1
+  fi
+
+  cat >> "$harness" <<'EOF'
+
+fixture=$FIXTURE
+
+assert_field() {
+  expected=$1
+  field=$2
+  actual=$(codesign_field "$fixture" "$field")
+  if [ "$actual" != "$expected" ]; then
+    printf '%s\n' "codesign-field-parser: $field=$actual expected $expected" >&2
+    exit 1
+  fi
+}
+
+assert_field 'tech.watzon.semantouch.cli' Identifier
+assert_field 'MB5789APU7' TeamIdentifier
+assert_field 'Developer ID Application: Watzon Ventures LLc (MB5789APU7)' Authority
+assert_field '0x10000(runtime)' flags
+EOF
+
+  FIXTURE=$fixture /bin/sh -c '. "$1"' sh "$harness"
+done
+
+printf '%s\n' 'codesign-field-parser: ok'

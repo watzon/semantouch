@@ -36,7 +36,9 @@ jobs:
           xcrun --find hdiutil
 
       - name: Test
-        run: swift test
+        run: |
+          swift test
+          scripts/tests/codesign-field-parser
 
       - name: Build host and relay for arm64 and x86_64
         id: build

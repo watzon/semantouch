@@ -43,7 +43,7 @@ proprietary computer-use binaries.
 A Swift toolchain and `just` are needed only for source builds and development.
 
 > [!NOTE]
-> **v0.2.1** is the final legacy arm64-helper release. **v0.3.1 and later**
+> **v0.2.1** is the final legacy arm64-helper release. **v0.3.2 and later**
 > publish a signed/notarized universal2 **`Semantouch.app`** as ZIP and DMG
 > artifacts; the npm and Homebrew installers consume that same immutable app ZIP.
 
@@ -52,7 +52,7 @@ A Swift toolchain and `just` are needed only for source builds and development.
 Install a tagged release directly:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.3.1
+omp plugin install github:watzon/semantouch#v0.3.2
 ```
 
 Alternatively, add this repository as a marketplace and install its catalog entry:

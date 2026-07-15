@@ -159,11 +159,20 @@ require_macho_universal2() {
 codesign_field() {
   _details=$1
   _field=$2
-  printf '%s\n' "$_details" | /usr/bin/awk -F= -v key="$_field" '
+  printf '%s\n' "$_details" | /usr/bin/awk -v key="$_field" '
     index($0, key "=") == 1 {
       sub(/^[^=]*=/, "")
       print
       exit
+    }
+    {
+      for (i = 1; i <= NF; i++) {
+        if (index($i, key "=") == 1) {
+          sub(/^[^=]*=/, "", $i)
+          print $i
+          exit
+        }
+      }
     }
   '
 }

@@ -14,7 +14,7 @@ Public computer-use support remains **macOS only**. Windows/Linux GA is not clai
 
 | Field | Value | Source |
 |---|---|---|
-| Version | `0.3.1` | `Sources/MCPServer/MCPServer.swift` `serverVersion`, `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
+| Version | `0.3.2` | `Sources/MCPServer/MCPServer.swift` `serverVersion`, `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Bundle id | `tech.watzon.semantouch` | `Sources/SemantouchCLIKit/Packaging.swift` `bundleId` |
 | Host executable | `SemantouchHost` | `Packaging.hostExecutableName` |
 | Nested relay | `semantouch` | `Packaging.relayExecutableName` |
@@ -46,8 +46,8 @@ scripts/verify-release-metadata "$(swift build -c release --show-bin-path)/seman
 Create and push a matching `v<version>` tag:
 
 ```sh
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
 The workflow rejects a tag that does not exactly match the package and binary version,
@@ -159,8 +159,8 @@ xcrun notarytool store-credentials notarytool-password \
 scripts/assemble-app dist/SemantouchHost dist/semantouch dist/Semantouch.app
 scripts/sign-release dist/Semantouch.app "Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
 scripts/notarize-release dist/Semantouch.app
-SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release dist/Semantouch.app 0.3.1
-scripts/package-app-release dist/Semantouch.app dist 0.3.1 \
+SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release dist/Semantouch.app 0.3.2
+scripts/package-app-release dist/Semantouch.app dist 0.3.2 \
   "Developer ID Application: Watzon Ventures LLc (MB5789APU7)"
 ```
 
@@ -198,7 +198,7 @@ packaging constants):
 ```xml
 <key>CFBundleIdentifier</key>        <string>tech.watzon.semantouch</string>
 <key>CFBundleExecutable</key>        <string>SemantouchHost</string>
-<key>CFBundleShortVersionString</key> <string>0.3.1</string>   <!-- match MCPServer.serverVersion -->
+<key>CFBundleShortVersionString</key> <string>0.3.2</string>   <!-- match MCPServer.serverVersion -->
 <key>LSMinimumSystemVersion</key>    <string>14.0</string>
 <key>LSUIElement</key>               <true/>   <!-- accessory: no Dock icon, no menu bar -->
 ```
@@ -255,7 +255,7 @@ Verify:
 ```sh
 codesign --verify --strict --verbose=2 "Semantouch.app"
 codesign --display --entitlements - "Semantouch.app/Contents/MacOS/SemantouchHost"
-SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release "Semantouch.app" "0.3.1"
+SEMANTOUCH_REQUIRE_NOTARIZATION=1 scripts/verify-app-release "Semantouch.app" "0.3.2"
 spctl --assess --type execute --verbose "Semantouch.app"   # after notarization/staple
 ```
 
@@ -288,8 +288,8 @@ Stapling is supported for the `.app` and `.dmg` containers:
 ```sh
 xcrun stapler staple "Semantouch.app"
 xcrun stapler validate "Semantouch.app"
-xcrun stapler staple "Semantouch-v0.3.1-macos-universal2.dmg"
-xcrun stapler validate "Semantouch-v0.3.1-macos-universal2.dmg"
+xcrun stapler staple "Semantouch-v0.3.2-macos-universal2.dmg"
+xcrun stapler validate "Semantouch-v0.3.2-macos-universal2.dmg"
 ```
 
 A standalone executable may be submitted inside an archive, but the executable itself
