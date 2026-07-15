@@ -19,7 +19,7 @@ Public computer-use support is **macOS only**. Windows/Linux are not GA.
 
 ## Published vs next-release assets (important)
 
-Current package/app version is **`0.3.0`**
+Current package/app version is **`0.3.1`**
 (`Sources/MCPServer/MCPServer.swift` `serverVersion`, `package.json`,
 `.claude-plugin/plugin.json`).
 
@@ -69,7 +69,7 @@ public install methods.
 Install a specific release tag:
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.3.0
+omp plugin install github:watzon/semantouch#v0.3.1
 ```
 
 Or use the repository's OMP/Claude-compatible marketplace catalog:
@@ -186,7 +186,7 @@ Verify:
 
 ```sh
 "$(swift build -c release --show-bin-path)/semantouch" --version
-# semantouch 0.3.0 (contract semantouch/1, MCP 2025-06-18)
+# semantouch 0.3.1 (contract semantouch/1, MCP 2025-06-18)
 ```
 
 For a distribution-shaped layout, assemble/sign with the release scripts
@@ -230,7 +230,7 @@ Example shape (paths vary by install):
 ```
 helper:          /Applications/Semantouch.app/Contents/MacOS/SemantouchHost
   signed:        true
-  version:       0.3.0
+  version:       0.3.1
 accessibility:   denied
 screenRecording: denied
 ready:           false

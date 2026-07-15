@@ -41,7 +41,7 @@ Semantouch 只使用公开 Apple API，不依赖私有框架或专有 computer-u
 仅在源码构建与开发时需要 Swift 工具链和 `just`。
 
 > [!NOTE]
-> **v0.2.1** 是最后一个旧版 arm64 helper release。自 **v0.3.0** 起，release
+> **v0.2.1** 是最后一个旧版 arm64 helper release。自 **v0.3.1** 起，release
 > 以 ZIP 和 DMG 发布已签名、已公证的 universal2 **`Semantouch.app`**；npm 与
 > Homebrew 安装器使用同一个不可变 app ZIP。
 
@@ -50,7 +50,7 @@ Semantouch 只使用公开 Apple API，不依赖私有框架或专有 computer-u
 直接安装带标签的 release：
 
 ```sh
-omp plugin install github:watzon/semantouch#v0.3.0
+omp plugin install github:watzon/semantouch#v0.3.1
 ```
 
 或者把本仓库添加为 marketplace，再安装目录中的条目：

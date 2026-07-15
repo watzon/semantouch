@@ -393,7 +393,6 @@ final class HostClientAndRelayTests: XCTestCase {
     }
 
     func testPeerVerifierFakeRejectionPaths() throws {
-        let location = try makeLocation()
         // Wrong euid on fixed identity.
         let badIdentity = PeerIdentity(
             euid: euid &+ 1,

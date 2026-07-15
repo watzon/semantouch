@@ -4,38 +4,38 @@ import Darwin
 /// Injectable low-level socket / fd operations. Production uses `.live`;
 /// tests substitute fakes for permission-free peer and I/O paths.
 public struct SocketSyscalls: Sendable {
-    public var socket: (Int32, Int32, Int32) -> Int32
-    public var bind: (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32
-    public var listen: (Int32, Int32) -> Int32
-    public var accept: (Int32, UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<socklen_t>?) -> Int32
-    public var connect: (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32
-    public var close: (Int32) -> Int32
-    public var read: (Int32, UnsafeMutableRawPointer, Int) -> Int
-    public var write: (Int32, UnsafeRawPointer, Int) -> Int
-    public var shutdown: (Int32, Int32) -> Int32
-    public var fcntl: (Int32, Int32, Int32) -> Int32
-    public var setsockopt: (Int32, Int32, Int32, UnsafeRawPointer?, socklen_t) -> Int32
-    public var getsockopt: (Int32, Int32, Int32, UnsafeMutableRawPointer?, UnsafeMutablePointer<socklen_t>?) -> Int32
-    public var chmodPath: (String, mode_t) -> Int32
-    public var unlink: (String) -> Int32
-    public var getpeereid: (Int32, UnsafeMutablePointer<uid_t>, UnsafeMutablePointer<gid_t>) -> Int32
+    public var socket: @Sendable (Int32, Int32, Int32) -> Int32
+    public var bind: @Sendable (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32
+    public var listen: @Sendable (Int32, Int32) -> Int32
+    public var accept: @Sendable (Int32, UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<socklen_t>?) -> Int32
+    public var connect: @Sendable (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32
+    public var close: @Sendable (Int32) -> Int32
+    public var read: @Sendable (Int32, UnsafeMutableRawPointer, Int) -> Int
+    public var write: @Sendable (Int32, UnsafeRawPointer, Int) -> Int
+    public var shutdown: @Sendable (Int32, Int32) -> Int32
+    public var fcntl: @Sendable (Int32, Int32, Int32) -> Int32
+    public var setsockopt: @Sendable (Int32, Int32, Int32, UnsafeRawPointer?, socklen_t) -> Int32
+    public var getsockopt: @Sendable (Int32, Int32, Int32, UnsafeMutableRawPointer?, UnsafeMutablePointer<socklen_t>?) -> Int32
+    public var chmodPath: @Sendable (String, mode_t) -> Int32
+    public var unlink: @Sendable (String) -> Int32
+    public var getpeereid: @Sendable (Int32, UnsafeMutablePointer<uid_t>, UnsafeMutablePointer<gid_t>) -> Int32
 
     public init(
-        socket: @escaping (Int32, Int32, Int32) -> Int32,
-        bind: @escaping (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32,
-        listen: @escaping (Int32, Int32) -> Int32,
-        accept: @escaping (Int32, UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<socklen_t>?) -> Int32,
-        connect: @escaping (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32,
-        close: @escaping (Int32) -> Int32,
-        read: @escaping (Int32, UnsafeMutableRawPointer, Int) -> Int,
-        write: @escaping (Int32, UnsafeRawPointer, Int) -> Int,
-        shutdown: @escaping (Int32, Int32) -> Int32,
-        fcntl: @escaping (Int32, Int32, Int32) -> Int32,
-        setsockopt: @escaping (Int32, Int32, Int32, UnsafeRawPointer?, socklen_t) -> Int32,
-        getsockopt: @escaping (Int32, Int32, Int32, UnsafeMutableRawPointer?, UnsafeMutablePointer<socklen_t>?) -> Int32,
-        chmodPath: @escaping (String, mode_t) -> Int32,
-        unlink: @escaping (String) -> Int32,
-        getpeereid: @escaping (Int32, UnsafeMutablePointer<uid_t>, UnsafeMutablePointer<gid_t>) -> Int32
+        socket: @escaping @Sendable (Int32, Int32, Int32) -> Int32,
+        bind: @escaping @Sendable (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32,
+        listen: @escaping @Sendable (Int32, Int32) -> Int32,
+        accept: @escaping @Sendable (Int32, UnsafeMutablePointer<sockaddr>?, UnsafeMutablePointer<socklen_t>?) -> Int32,
+        connect: @escaping @Sendable (Int32, UnsafePointer<sockaddr>, socklen_t) -> Int32,
+        close: @escaping @Sendable (Int32) -> Int32,
+        read: @escaping @Sendable (Int32, UnsafeMutableRawPointer, Int) -> Int,
+        write: @escaping @Sendable (Int32, UnsafeRawPointer, Int) -> Int,
+        shutdown: @escaping @Sendable (Int32, Int32) -> Int32,
+        fcntl: @escaping @Sendable (Int32, Int32, Int32) -> Int32,
+        setsockopt: @escaping @Sendable (Int32, Int32, Int32, UnsafeRawPointer?, socklen_t) -> Int32,
+        getsockopt: @escaping @Sendable (Int32, Int32, Int32, UnsafeMutableRawPointer?, UnsafeMutablePointer<socklen_t>?) -> Int32,
+        chmodPath: @escaping @Sendable (String, mode_t) -> Int32,
+        unlink: @escaping @Sendable (String) -> Int32,
+        getpeereid: @escaping @Sendable (Int32, UnsafeMutablePointer<uid_t>, UnsafeMutablePointer<gid_t>) -> Int32
     ) {
         self.socket = socket
         self.bind = bind

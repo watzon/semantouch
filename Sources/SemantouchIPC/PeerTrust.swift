@@ -110,16 +110,16 @@ public protocol PeerVerifying: Sendable {
 // MARK: - Credential extraction seam
 
 public struct PeerCredentialSeam: Sendable {
-    public var getpeereid: (Int32) throws -> (uid_t, gid_t)
-    public var auditToken: (Int32) throws -> audit_token_t
-    public var pidFromAuditToken: (audit_token_t) -> pid_t
-    public var codeInfo: (audit_token_t) throws -> (identifier: String, team: String, path: String)
+    public var getpeereid: @Sendable (Int32) throws -> (uid_t, gid_t)
+    public var auditToken: @Sendable (Int32) throws -> audit_token_t
+    public var pidFromAuditToken: @Sendable (audit_token_t) -> pid_t
+    public var codeInfo: @Sendable (audit_token_t) throws -> (identifier: String, team: String, path: String)
 
     public init(
-        getpeereid: @escaping (Int32) throws -> (uid_t, gid_t),
-        auditToken: @escaping (Int32) throws -> audit_token_t,
-        pidFromAuditToken: @escaping (audit_token_t) -> pid_t,
-        codeInfo: @escaping (audit_token_t) throws -> (identifier: String, team: String, path: String)
+        getpeereid: @escaping @Sendable (Int32) throws -> (uid_t, gid_t),
+        auditToken: @escaping @Sendable (Int32) throws -> audit_token_t,
+        pidFromAuditToken: @escaping @Sendable (audit_token_t) -> pid_t,
+        codeInfo: @escaping @Sendable (audit_token_t) throws -> (identifier: String, team: String, path: String)
     ) {
         self.getpeereid = getpeereid
         self.auditToken = auditToken

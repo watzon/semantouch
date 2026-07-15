@@ -1,6 +1,6 @@
 {
   "name": "@watzon/semantouch",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Thin macOS bootstrap CLI for the signed Semantouch.app computer-use helper.",
   "license": "MIT",
   "type": "commonjs",
