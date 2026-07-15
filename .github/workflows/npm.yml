@@ -260,12 +260,19 @@ jobs:
           const fs = require("node:fs");
 
           const manifestPath = process.argv[2];
-          const entries = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          if (!Array.isArray(entries) || entries.length !== 1) {
+          const result = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          if (!result || typeof result !== "object") {
+            throw new Error("npm pack result must be an array or object");
+          }
+
+          const entries = Array.isArray(result) ? result : Object.values(result);
+          if (entries.length !== 1) {
             throw new Error(`expected one npm pack result, got ${entries.length}`);
           }
 
-          const files = entries[0].files;
+          const entry = entries[0];
+
+          const files = entry.files;
           if (!Array.isArray(files)) {
             throw new Error("npm pack result is missing files");
           }
